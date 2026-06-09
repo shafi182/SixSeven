@@ -14,7 +14,7 @@ git branch -M main
 # GANTI tautan di bawah ini dengan tautan milik Anda!
 git remote add origin 
 
-https://github.com
+https://github.com/shafi182/SixSeven.git
 
 
 
