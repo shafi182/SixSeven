@@ -1,0 +1,125 @@
+// flush_sensor_esp32.cpp
+// ESP32 / PlatformIO Arduino example.
+//
+// Utility sketch: inspect and completely erase the R503 flash library.
+//
+// Alur:
+//   1. Tampilkan jumlah template dan daftar slot yang terisi (SEBELUM)
+//   2. Hapus semua isi sensor (empty_library)
+//   3. Tampilkan kembali isi sensor (SETELAH) untuk konfirmasi
+//   4. Berhenti -- tidak ada loop, jalankan sekali lalu reset manual.
+//
+// Wiring (sama dengan contoh enroll/absensi):
+//   R503 YEL -> GPIO16 (RX2)   R503 GRN -> GPIO17 (TX2)
+
+#include <Arduino.h>
+#include "Adafruit_Fingerprint_ESP32.h"
+
+HardwareSerial FingerSerial(2);
+Adafruit_Fingerprint_ESP32 finger(&FingerSerial);
+
+static const int FP_RX_PIN = 32;
+static const int FP_TX_PIN = 33;
+
+// Maximum slots to report (library_size typically <= 200 for R503).
+#define MAX_SLOTS 300
+static uint16_t slotList[MAX_SLOTS];
+
+// ---------- Print helper ----------
+static void printSensorContents(const char* label) {
+    Serial.println(F("--------------------------------------------------"));
+    Serial.println(label);
+    Serial.println(F("--------------------------------------------------"));
+
+    // 1. Jumlah template via count_templates()
+    if (finger.count_templates() == FP_OK) {
+        Serial.print(F("Jumlah template (count_templates): "));
+        Serial.println(finger.template_count);
+    } else {
+        Serial.println(F("count_templates gagal."));
+    }
+
+    // 2. Daftar slot via read_templates()
+    uint16_t foundCount = 0;
+    uint8_t st = finger.read_templates(slotList, MAX_SLOTS, &foundCount);
+    if (st == FP_OK) {
+        Serial.print(F("Slot terisi (read_templates): "));
+        Serial.print(foundCount);
+        Serial.println(F(" slot"));
+
+        if (foundCount == 0) {
+            Serial.println(F("  (kosong)"));
+        } else {
+            // Print up to 20 slots per line for readability.
+            Serial.print(F("  Slot: "));
+            for (uint16_t i = 0; i < foundCount; i++) {
+                Serial.print(slotList[i]);
+                if (i < foundCount - 1) {
+                    Serial.print(F(", "));
+                    if ((i + 1) % 20 == 0) {
+                        Serial.println();
+                        Serial.print(F("         "));
+                    }
+                }
+            }
+            Serial.println();
+        }
+    } else {
+        Serial.print(F("read_templates gagal, err 0x"));
+        Serial.println(st, HEX);
+    }
+
+    Serial.println(F("--------------------------------------------------"));
+    Serial.println();
+}
+
+// ---------- Setup (runs once) ----------
+void setup() {
+    Serial.begin(115200);
+    delay(500);
+    Serial.println(F("\n========================================"));
+    Serial.println(F("   FLUSH UTILITY - R503 SENSOR ESP32   "));
+    Serial.println(F("========================================\n"));
+
+    if (!finger.begin(57600, FP_RX_PIN, FP_TX_PIN)) {
+        Serial.println(F("ERROR: Sensor tidak terdeteksi. Cek wiring."));
+        while (true) { delay(1000); }
+    }
+    Serial.print(F("Sensor OK. Library capacity = "));
+    Serial.print(finger.library_size);
+    Serial.print(F("  Security level = "));
+    Serial.println(finger.security_level);
+    Serial.println();
+
+    // ---- LANGKAH 1: Tampilkan isi sebelum flush ----
+    printSensorContents("[ SEBELUM FLUSH ]");
+
+    // ---- LANGKAH 2: Flush ----
+    Serial.println(F("Menghapus semua template dari sensor..."));
+    uint8_t st = finger.empty_library();
+    if (st == FP_OK) {
+        Serial.println(F("empty_library: OK"));
+    } else {
+        Serial.print(F("empty_library GAGAL, err 0x"));
+        Serial.println(st, HEX);
+        Serial.println(F("Cek koneksi dan coba lagi."));
+        while (true) { delay(1000); }
+    }
+    delay(500); // beri sensor waktu menyimpan perubahan ke flash
+    Serial.println();
+
+    // ---- LANGKAH 3: Tampilkan isi setelah flush ----
+    printSensorContents("[ SETELAH FLUSH ]");
+
+    // ---- Selesai ----
+    Serial.println(F("========================================"));
+    Serial.println(F("Flush selesai. Reset ESP32 jika ingin"));
+    Serial.println(F("menjalankan ulang atau upload sketch lain."));
+    Serial.println(F("========================================"));
+}
+
+// ---------- Loop (tidak dipakai) ----------
+void loop() {
+    // Tidak ada yang perlu dilakukan. Sketch ini one-shot.
+    delay(10000);
+}

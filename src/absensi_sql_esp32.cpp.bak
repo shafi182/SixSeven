@@ -1,0 +1,228 @@
+// absensi_sql_esp32.cpp
+// ESP32 / PlatformIO Arduino example.
+//
+// Equivalent to the Python `absensi_sql.py`. The original Python script reads
+// rows from Azure SQL and pushes each template into the sensor. Here we keep
+// the same flow but feed the rows in from the Serial Monitor at boot --
+// you paste each user_id + HEX template (exactly as printed by the
+// enroll_sql_esp32 example) and the ESP32 injects them into the sensor via
+// send_fpdata() + store_model().
+//
+// Why not hardcode the hex in source? An R503 char file is 1536 bytes
+// (3072 hex chars), almost all of which is structural padding. Pasting
+// thousands of characters into a C string literal is extremely error prone;
+// reading them at runtime is both safer and closer to how a real device
+// would fetch rows from a database.
+//
+// Boot flow (mirrors load_azure_ke_sensor() in Python):
+//   1. empty_library()
+//   2. Repeat:
+//        - Read "user_id"  (or "GO" to finish loading)
+//        - Read 3072-char HEX
+//        - send_fpdata(...) -> store_model(slot)
+//        - cache_user_id[slot] = user_id
+//   3. Enter attendance loop: scan finger -> finger_search -> log.
+
+#include <Arduino.h>
+#include "Adafruit_Fingerprint_ESP32.h"
+
+HardwareSerial FingerSerial(2);
+Adafruit_Fingerprint_ESP32 finger(&FingerSerial);
+
+static const int FP_RX_PIN = 32;
+static const int FP_TX_PIN = 33;
+static const uint32_t TIMEOUT_DETIK = 10;
+static const size_t EXPECTED_HEX_LEN = 3072; // R503 char-file size
+
+#define MAX_CACHE 32
+static String  cache_user_id[MAX_CACHE];
+static uint16_t cache_count = 0;
+
+// ---- LED helpers ----
+static void set_lampu(uint8_t color, uint8_t mode) {
+    finger.set_led(color, mode);
+}
+
+static void simpan_log_lokal(const String& user_id) {
+    Serial.print(F("HADIR: "));
+    Serial.print(user_id);
+    Serial.print(F("  @ uptime_ms="));
+    Serial.println(millis());
+}
+
+// Blocking read of a single line from Serial. Strips CR.
+// Skips any empty lines (so multiple Enter presses are tolerated).
+static String readSerialLine() {
+    while (true) {
+        String s;
+        while (true) {
+            while (!Serial.available()) { delay(5); yield(); }
+            char c = (char)Serial.read();
+            if (c == '\r') continue;
+            if (c == '\n') break;
+            s += c;
+        }
+        s.trim();
+        if (s.length() > 0) return s;
+    }
+}
+
+// Inject one hex template into the sensor under flash slot `slot`.
+// Returns true on success.
+static bool injectTemplate(const String& hex, uint16_t slot) {
+    if (hex.length() != EXPECTED_HEX_LEN) {
+        Serial.print(F("Hex length salah: "));
+        Serial.print(hex.length());
+        Serial.print(F(" (harus "));
+        Serial.print(EXPECTED_HEX_LEN);
+        Serial.println(F(")"));
+        return false;
+    }
+    uint8_t raw[FP_TEMPLATE_MAX];
+    size_t rawLen = Adafruit_Fingerprint_ESP32::hexStringToBytes(
+                        hex, raw, sizeof(raw));
+    if (rawLen == 0) {
+        Serial.println(F("Hex decode error (karakter non-hex?)"));
+        return false;
+    }
+    uint8_t st = finger.send_fpdata(raw, rawLen, FP_BUFFER_CHAR, 1);
+    if (st != FP_OK) {
+        Serial.print(F("send_fpdata err 0x"));
+        Serial.println(st, HEX);
+        return false;
+    }
+    delay(50);
+    st = finger.store_model(slot, 1);
+    if (st != FP_OK) {
+        Serial.print(F("store_model err 0x"));
+        Serial.println(st, HEX);
+        return false;
+    }
+    return true;
+}
+
+// Walk through user input loading templates until they type "GO".
+static bool load_database_ke_sensor() {
+    Serial.println(F("\n=== LOAD DATABASE KE SENSOR ==="));
+    Serial.println(F("Reset library sensor..."));
+    if (finger.empty_library() != FP_OK) {
+        Serial.println(F("empty_library gagal."));
+        return false;
+    }
+    cache_count = 0;
+
+    Serial.println(F("Format input untuk setiap user:"));
+    Serial.println(F("  1) Ketik USER_ID lalu Enter (atau 'GO' untuk selesai)"));
+    Serial.println(F("  2) Paste HEX template (3072 char) lalu Enter"));
+    Serial.println();
+
+    while (cache_count < MAX_CACHE) {
+        Serial.print(F("USER_ID #"));
+        Serial.print(cache_count);
+        Serial.print(F(" (atau 'GO'): "));
+        String uid = readSerialLine();
+        Serial.println(uid);
+
+        if (uid.equalsIgnoreCase("GO")) break;
+
+        Serial.print(F("HEX template untuk '"));
+        Serial.print(uid);
+        Serial.println(F("' (3072 char, lalu Enter):"));
+        String hex = readSerialLine();
+
+        if (!injectTemplate(hex, cache_count)) {
+            Serial.println(F("Gagal load - ulangi user ini.\n"));
+            continue;
+        }
+        cache_user_id[cache_count] = uid;
+        Serial.print(F(" -> OK, slot "));
+        Serial.print(cache_count);
+        Serial.print(F(" = '"));
+        Serial.print(uid);
+        Serial.println(F("'\n"));
+        cache_count++;
+        delay(200);
+    }
+
+    Serial.print(F("Selesai. "));
+    Serial.print(cache_count);
+    Serial.println(F(" template ter-load."));
+    return cache_count > 0;
+}
+
+void setup() {
+    // Bump RX buffer so a 3072-char paste from the Serial Monitor cannot
+    // overflow the default 256-byte queue. MUST be called BEFORE begin().
+    Serial.setRxBufferSize(4096);
+    Serial.begin(115200);
+    delay(500);
+    Serial.println(F("\n=== ABSENSI TERINTEGRASI DATABASE (ESP32) ==="));
+
+    if (!finger.begin(57600, FP_RX_PIN, FP_TX_PIN)) {
+        Serial.println(F("Sensor tidak terdeteksi, cek wiring."));
+        while (true) { delay(1000); }
+    }
+    Serial.print(F("Sensor OK. Library capacity = "));
+    Serial.println(finger.library_size);
+
+    if (!load_database_ke_sensor()) {
+        Serial.println(F("Tidak ada jari yang ter-load. Stop."));
+        while (true) { delay(1000); }
+    }
+    Serial.println(F("\n=== MODE ABSENSI AKTIF ==="));
+}
+
+void loop() {
+    set_lampu(FP_LED_BLUE, FP_LED_BREATHE);
+    Serial.print(F("\nMenunggu jari ("));
+    Serial.print(TIMEOUT_DETIK);
+    Serial.println(F(" detik)..."));
+
+    uint32_t t0 = millis();
+    bool detected = false;
+    while (millis() - t0 < TIMEOUT_DETIK * 1000UL) {
+        if (finger.get_image() == FP_OK) { detected = true; break; }
+        delay(50);
+        yield();
+    }
+
+    if (!detected) {
+        Serial.println(F("Waktu habis."));
+        set_lampu(FP_LED_BLUE, FP_LED_OFF);
+        delay(1500);
+        return;
+    }
+
+    Serial.println(F("Memproses..."));
+    if (finger.image_2_tz(1) != FP_OK) {
+        Serial.println(F("image_2_tz gagal."));
+        set_lampu(FP_LED_RED, FP_LED_FLASH);
+        delay(1500);
+        set_lampu(FP_LED_GREEN, FP_LED_OFF);
+        return;
+    }
+
+    if (finger.finger_search() != FP_OK) {
+        Serial.println(F("Tidak dikenali."));
+        set_lampu(FP_LED_RED, FP_LED_FLASH);
+        delay(1500);
+        set_lampu(FP_LED_GREEN, FP_LED_OFF);
+        return;
+    }
+
+    Serial.print(F("Match! slot="));
+    Serial.print(finger.finger_id);
+    Serial.print(F("  confidence="));
+    Serial.println(finger.confidence);
+
+    if (finger.finger_id < cache_count) {
+        set_lampu(FP_LED_GREEN, FP_LED_ON);
+        simpan_log_lokal(cache_user_id[finger.finger_id]);
+    } else {
+        Serial.println(F("Error Index Cache."));
+        set_lampu(FP_LED_RED, FP_LED_FLASH);
+    }
+
+    delay(1500);
+    set_lampu(FP_LED_GREEN, FP_LED_OFF);
+}

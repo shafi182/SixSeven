@@ -1,0 +1,183 @@
+// enroll_sql_esp32.cpp
+// ESP32 / PlatformIO Arduino example.
+//
+// Equivalent to the Python `enroll_sql.py`: enrolls a finger by capturing
+// two images, fuses them into a template via create_model(), pulls the
+// template out of char buffer 1 with get_fpdata(), converts it to a HEX
+// string, and prints it over Serial as if it were being POSTed to Azure SQL.
+//
+// Wiring (R503 default):
+//   R503 RED   -> 3V3
+//   R503 BLACK -> GND
+//   R503 YEL   -> ESP32 GPIO16 (RX2)   <- sensor TX
+//   R503 GRN   -> ESP32 GPIO17 (TX2)   <- sensor RX
+//   R503 BLUE  -> 3V3 (sensor "wake" / touch sense; tie high if unused)
+//   R503 WHT   -> GND (sensor IRQ ref; optional)
+//
+// platformio.ini snippet:
+//   [env:esp32dev]
+//   platform   = espressif32
+//   board      = esp32dev
+//   framework  = arduino
+//   monitor_speed = 115200
+
+#include <Arduino.h>
+#include "Adafruit_Fingerprint_ESP32.h"
+
+// Sensor on UART2 of the ESP32.
+HardwareSerial FingerSerial(2);
+Adafruit_Fingerprint_ESP32 finger(&FingerSerial);
+
+// Pick the pins you wired up.
+static const int FP_RX_PIN = 16; // ESP32 RX <- sensor TX
+static const int FP_TX_PIN = 17; // ESP32 TX -> sensor RX
+
+// ---- LED helpers (mirror the Python set_lampu(warna, mode)) ----
+static void set_lampu(uint8_t color, uint8_t mode) {
+    finger.set_led(color, mode);
+}
+
+// ---- Wait helpers with timeout (non-blocking-friendly polling) ----
+static bool waitForFinger(uint32_t timeoutMs) {
+    uint32_t t0 = millis();
+    while (millis() - t0 < timeoutMs) {
+        if (finger.get_image() == FP_OK) return true;
+        delay(50);
+        yield();
+    }
+    return false;
+}
+
+static bool waitForFingerRemoval(uint32_t timeoutMs) {
+    uint32_t t0 = millis();
+    while (millis() - t0 < timeoutMs) {
+        if (finger.get_image() == FP_NOFINGER) return true;
+        delay(50);
+        yield();
+    }
+    return false;
+}
+
+// ---- Simulated "send to Azure SQL" -- in real use, POST `hex` to your API ----
+static bool simpan_ke_azure(const String& user_id, const String& hex_data) {
+    Serial.println();
+    Serial.println(F("=== SIMULATED SQL INSERT ==="));
+    Serial.print  (F("INSERT INTO fingerprint_db (user_id, sidik_jari) VALUES ('"));
+    Serial.print  (user_id);
+    Serial.print  (F("', '"));
+    Serial.print  (hex_data);
+    Serial.println(F("');"));
+    Serial.print  (F("HEX length: "));
+    Serial.println(hex_data.length());
+    Serial.println(F("============================"));
+    return true;
+}
+
+// ---- Run one full enrollment, returns hex string or "" on failure ----
+static String enroll_binary() {
+    Serial.println(F("\nTempelkan jari..."));
+    set_lampu(FP_LED_BLUE, FP_LED_BREATHE);
+
+    if (!waitForFinger(15000)) {
+        Serial.println(F("Timeout - tidak ada jari."));
+        return "";
+    }
+    if (finger.image_2_tz(1) != FP_OK) {
+        Serial.println(F("Gagal image_2_tz slot 1"));
+        return "";
+    }
+
+    Serial.println(F("Angkat jari..."));
+    set_lampu(FP_LED_BLUE, FP_LED_OFF);
+    delay(1000);
+    waitForFingerRemoval(5000);
+
+    Serial.println(F("Tempelkan lagi..."));
+    set_lampu(FP_LED_PURPLE, FP_LED_BREATHE);
+
+    if (!waitForFinger(15000)) {
+        Serial.println(F("Timeout - tidak ada jari."));
+        return "";
+    }
+    if (finger.image_2_tz(2) != FP_OK) {
+        Serial.println(F("Gagal image_2_tz slot 2"));
+        return "";
+    }
+
+    if (finger.create_model() != FP_OK) {
+        Serial.println(F("Jari tidak cocok (create_model gagal)."));
+        set_lampu(FP_LED_RED, FP_LED_FLASH);
+        return "";
+    }
+
+    // Pull the fused template out of char buffer 1.
+    uint8_t buf[FP_TEMPLATE_MAX];
+    size_t  outLen = 0;
+    uint8_t st = finger.get_fpdata(buf, sizeof(buf), &outLen, FP_BUFFER_CHAR, 1);
+    if (st != FP_OK) {
+        Serial.print(F("get_fpdata error 0x"));
+        Serial.println(st, HEX);
+        return "";
+    }
+    Serial.print(F("Template bytes diterima: "));
+    Serial.println((uint32_t)outLen);
+
+    return Adafruit_Fingerprint_ESP32::bytesToHexString(buf, outLen);
+}
+
+// ---- Read a line from Serial (acts as input()) ----
+static String readSerialLine() {
+    String s;
+    while (true) {
+        while (!Serial.available()) { delay(10); yield(); }
+        char c = (char)Serial.read();
+        if (c == '\r') continue;
+        if (c == '\n') return s;
+        s += c;
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    delay(500);
+    Serial.println(F("=== ENROLLMENT KE DATABASE SQL (ESP32) ==="));
+
+    if (!finger.begin(57600, FP_RX_PIN, FP_TX_PIN)) {
+        Serial.println(F("Error: sensor tidak ditemukan, cek wiring/baudrate."));
+        while (true) { delay(1000); }
+    }
+    Serial.print(F("Sensor OK. Library capacity = "));
+    Serial.println(finger.library_size);
+    Serial.print(F("Data packet size code = "));
+    Serial.println(finger.data_packet_size);
+
+    set_lampu(FP_LED_GREEN, FP_LED_OFF);
+}
+
+void loop() {
+    Serial.println(F("\n-----------------------------------"));
+    Serial.print  (F("Masukkan User ID (atau 'q' keluar): "));
+    String userInput = readSerialLine();
+    Serial.println(userInput);
+
+    if (userInput.equalsIgnoreCase("q")) {
+        set_lampu(FP_LED_GREEN, FP_LED_OFF);
+        Serial.println(F("Bye."));
+        while (true) { delay(1000); }
+    }
+    if (userInput.length() == 0) return;
+
+    String hexData = enroll_binary();
+    if (hexData.length() > 0) {
+        if (simpan_ke_azure(userInput, hexData)) {
+            set_lampu(FP_LED_GREEN, FP_LED_ON);
+        } else {
+            set_lampu(FP_LED_RED, FP_LED_FLASH);
+        }
+        delay(1000);
+        set_lampu(FP_LED_GREEN, FP_LED_OFF);
+    } else {
+        Serial.println(F("Gagal Enroll."));
+        set_lampu(FP_LED_GREEN, FP_LED_OFF);
+    }
+}
