@@ -17,4 +17,4 @@ git remote add origin https://github.com/shafi182/SixSeven.git
 
 
 # 6. Push semua file ke GitHub
-git push -u origin main
+git push -u origin main --force
