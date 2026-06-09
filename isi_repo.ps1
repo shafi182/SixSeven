@@ -12,9 +12,7 @@ git branch -M main
 
 # 5. Hubungkan folder lokal dengan tautan GitHub yang Anda salin tadi
 # GANTI tautan di bawah ini dengan tautan milik Anda!
-git remote add origin 
-
-https://github.com/shafi182/SixSeven.git
+git remote add origin https://github.com/shafi182/SixSeven.git
 
 
 
