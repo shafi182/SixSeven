@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+push_to_git.ps1
+first_push.ps1
+fix_fingerprint.ps1
