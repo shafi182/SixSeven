@@ -15,7 +15,7 @@ bool UserManager::init() {
     if (!f) {
         f = sd.open("/users.csv", FILE_WRITE);
         if (f) {
-            f.println("id,nip,pin,role,fingerprint_id");
+            f.println("id,nip,pin,role,fingerprint_id,updated_at");
             f.close();
         }
     } else {

@@ -192,11 +192,48 @@ void APIManager::syncUsersFromAPI() {
     }
 }
 
-// ========== TUGAS 1: FETCH USERS & DELTA SYNC ==========
+// ========== DELTA SYNC HELPERS (file-local) ==========
+
+// Ambil nilai variant JSON sebagai String dengan aman (int64/long/string).
+// ArduinoJson v7 menyimpan integer besar (NIP 18 digit) sebagai int64_t, jadi
+// as<String>() mengembalikan digit penuh tanpa overflow.
+static String jvToStr(JsonVariantConst v) {
+    if (v.isNull()) return String("");
+    return v.as<String>();
+}
+
+// Pad/trim hex template ke PERSIS 3072 char (1536 byte) untuk R503.
+// Backend memangkas trailing zeros -> hex menyusut; sensor menolak template
+// yang panjangnya bukan 3072 char (Error 24). Kembalikan "" bila bukan template.
+static String padFpHex(String h) {
+    const int FP_HEX_LEN = 3072;
+    h.trim();
+    if (h.length() <= 100) return String("");   // bukan template valid / null
+    if (h.length() < FP_HEX_LEN) {
+        h.reserve(FP_HEX_LEN);                   // 1x alloc, hindari fragmentasi
+        while (h.length() < FP_HEX_LEN) h += '0';
+    } else if (h.length() > FP_HEX_LEN) {
+        h = h.substring(0, FP_HEX_LEN);
+    }
+    return h;
+}
+
+// Cek apakah sebuah NIP termasuk dalam vector target (untuk filter rewrite FP).
+static bool nipInList(const std::vector<String>& list, const String& nip) {
+    for (const auto& n : list) if (n == nip) return true;
+    return false;
+}
+
+// ========== TUGAS 1: FETCH USERS & DELTA SYNC (2 FASE) ==========
+// FASE 1: GET /api/device/users  -> metadata ringan (nip,pin,role,updated_at).
+//         Bandingkan updated_at vs users.csv lokal; kumpulkan NIP baru/berubah,
+//         upsert metadata ke users.csv (skema: id,nip,pin,role,fingerprint_id,updated_at).
+// FASE 2: Bila ada NIP yang perlu di-update, GET /api/device/user-fingerprints?nip=...
+//         lalu upsert fp_1_user + fp_2_user (padding 3072) ke fingerprint_users.csv.
 bool APIManager::fetchUsersAndSync() {
-    // Anggap GAGAL dulu; baru di-set sukses saat HTTP 200 di akhir.
+    // Anggap GAGAL dulu; baru di-set sukses saat seluruh alur tuntas.
     isSyncUserFailed = true;
-    syncStatusUsers = false;
+    syncStatusUsers  = false;
 
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println(F("[API] WiFi not connected, skipping API fetch"));
@@ -204,10 +241,9 @@ bool APIManager::fetchUsersAndSync() {
     }
 
     Serial.println(F("[API] ============================"));
-    Serial.println(F("[API] Starting fetch users from API..."));
+    Serial.println(F("[API] Delta Sync: FASE 1 (tarik metadata users)..."));
     isFetching = true;
 
-    // Show status on LCD
     lcd.clear();
     lcd.printLine(0, F("Sinkronisasi Users"));
     lcd.printLine(1, MSG_API_LOADING);
@@ -216,256 +252,325 @@ bool APIManager::fetchUsersAndSync() {
     WiFiClientSecure secureClient;
     secureClient.setInsecure();
 
+    // ===================== FASE 1: METADATA + DELTA CHECK =====================
     HTTPClient http;
     String url = String(API_BASE_URL) + "/api/device/users";
-
     Serial.printf_P(PSTR("[API] URL: %s\n"), url.c_str());
 
     http.begin(secureClient, url);
-
-    // ========== ADD ALL REQUIRED HEADERS (TUGAS 1) ==========
-    // Hanya menggunakan x-device-code dan x-device-secret untuk autentikasi
-    http.addHeader("x-device-code", DEVICE_CODE);
+    http.addHeader("x-device-code",   DEVICE_CODE);
     http.addHeader("x-device-secret", DEVICE_SECRET);
 
-    Serial.println(F("[API] Headers:"));
-    Serial.printf_P(PSTR("  - x-device-code: %s\n"), DEVICE_CODE);
-    Serial.printf_P(PSTR("  - x-device-secret: %s\n"), DEVICE_SECRET);
-
     int httpCode = http.GET();
-    Serial.printf_P(PSTR("[API] HTTP Code: %d\n"), httpCode);
+    Serial.printf_P(PSTR("[API] FASE 1 HTTP Code: %d\n"), httpCode);
 
-    if (httpCode > 0) {
-        String payload = http.getString();
-        Serial.printf_P(PSTR("[API] Response length: %d\n"), payload.length());
-
-        // ========== TUGAS 1: PRINT RAW JSON PAYLOAD ==========
-        Serial.println(F("[API] ===== RAW JSON RESPONSE ====="));
-        Serial.println(payload);
-        Serial.println(F("[API] ============================="));
-
-        if (httpCode == 200) {
-            Serial.println(F("[API] SUCCESS! Parsing JSON data..."));
-
-            JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, payload);
-
-            if (error) {
-                Serial.printf_P(PSTR("[API] JSON Parse Error: %s\n"), error.c_str());
-                lcd.printLine(2, F("JSON Parse Error"));
-                delay(2000);
-                http.end();
-                isFetching = false;
-                return false;
-            }
-
-            // TUGAS 2: Cek format JSON - coba "users" dulu (sesuai request user), fallback ke "data"
-            JsonArray users;
-            bool usingUsersKey = false;
-
-            if (doc["users"].is<JsonArray>()) {
-                users = doc["users"].as<JsonArray>();
-                usingUsersKey = true;
-                Serial.println(F("[API] Using 'users' key from API response"));
-            } else if (doc["data"].is<JsonArray>()) {
-                users = doc["data"].as<JsonArray>();
-                Serial.println(F("[API] Using 'data' key from API response"));
-            } else {
-                Serial.println(F("[API] No 'users' or 'data' key in response"));
-                lcd.printLine(2, F("Invalid Response"));
-                delay(2000);
-                http.end();
-                isFetching = false;
-                return false;
-            }
-
-            int userCount = users.size();
-
-            Serial.println(F("[API] ============================="));
-            Serial.printf_P(PSTR("[API] Total Users from API: %d\n"), userCount);
-            Serial.println(F("[API] ============================="));
-
-            // ========== HARD SYNC (MIRROR) ==========
-            // Tulis ulang users.csv + fingerprint_users.csv DARI NOL berdasarkan API.
-            // Tidak ada lagi delta-merge yang mempertahankan user lama -> NIP yang sudah
-            // dihapus di backend benar-benar musnah dari SD Card (no Ghost Data).
-            // Skema FP baru: fp_1_user + fp_2_user; fallback fp_user (skema lama).
-
-            // --- 1) Bersihkan kedua temp file ---
-            SD.remove("/temp_users.csv");
-            SD.remove("/temp_fingerprint_users.csv");
-            File tempUsers = SD.open("/temp_users.csv", FILE_WRITE);
-            File tempFp    = SD.open("/temp_fingerprint_users.csv", FILE_WRITE);
-            if (!tempUsers || !tempFp) {
-                Serial.println(F("[API] ERROR: Gagal buat temp file"));
-                if (tempUsers) tempUsers.close();
-                if (tempFp)    tempFp.close();
-                lcd.printLine(2, F("Error: temp file"));
-                delay(2000);
-                http.end();
-                isFetching = false;
-                return false;
-            }
-            tempUsers.println("id,nip,pin,role,fingerprint_id");
-            tempFp.println("id,user_id,role,data_jari,created_at");
-
-            // --- 2) Loop parsing JSON: per user, ekstrak fp_1 + fp_2, tulis ke 2 file ---
-            String timestamp = isTimeSynced() ? getFormattedTime() : "API_SYNC";
-            int userIdCounter = 1;   // ID baris di users.csv
-            int fpSlotCounter = 1;   // slot id (= id baris di fingerprint_users.csv)
-            int writtenUsers  = 0;
-            int writtenFps    = 0;
-
-            for (int i = 0; i < userCount; i++) {
-                JsonObject user = users[i];
-
-                // ----- NIP -----
-                String nipStr = "";
-                if      (user["nip"].is<const char*>()) nipStr = user["nip"].as<String>();
-                else if (user["nip"].is<long>())        nipStr = String(user["nip"].as<long>());
-                else if (user["nip"].is<int>())         nipStr = String(user["nip"].as<int>());
-                nipStr.trim();
-                if (nipStr.length() == 0 || nipStr == "null" || nipStr == "0") continue;
-
-                // ----- PIN -----
-                String pinStr = "";
-                if      (user["pin"].is<const char*>()) pinStr = user["pin"].as<String>();
-                else if (user["pin"].is<long>())        pinStr = String(user["pin"].as<long>());
-                else if (user["pin"].is<int>())         pinStr = String(user["pin"].as<int>());
-                pinStr.trim();
-
-                // ----- role -----
-                String role = "dosen";
-                if (user["role"].is<const char*>()) {
-                    role = user["role"].as<String>();
-                    role.trim();
-                }
-
-                // ----- fp_1_user / fp_2_user (fallback ke fp_user lama) -----
-                // Helper inline: ambil hex dgn null-check + PADDING ke 3072 char.
-                // Backend memangkas trailing zeros (trimHex) -> hex menyusut (~1760 char).
-                // R503 mewajibkan template PERSIS 3072 hex char (1536 bytes); kurang dari
-                // itu -> hex2bytes salah ukuran -> sensor tolak inject (Error 24).
-                // Pad balik dengan '0' agar valid untuk injeksi.
-                const int FP_HEX_LEN = 3072;
-                auto extractHex = [&](const char* key) -> String {
-                    if (user[key].isNull()) return String("");
-                    if (!user[key].is<const char*>()) return String("");
-                    String h = user[key].as<String>();
-                    h.trim();
-                    if (h.length() > 100) {
-                        if (h.length() < FP_HEX_LEN) {
-                            h.reserve(FP_HEX_LEN);           // 1x alloc, hindari fragmentasi
-                            while (h.length() < FP_HEX_LEN) h += '0';
-                        } else if (h.length() > FP_HEX_LEN) {
-                            h = h.substring(0, FP_HEX_LEN);  // jaga-jaga bila kelebihan
-                        }
-                    }
-                    return h;
-                };
-                String fp1Hex = extractHex("fp_1_user");
-                String fp2Hex = extractHex("fp_2_user");
-                if (fp1Hex.length() < 100) {
-                    // Fallback ke key lama bila backend belum konsisten (sudah ter-pad jg)
-                    String legacy = extractHex("fp_user");
-                    if (legacy.length() >= 100) fp1Hex = legacy;
-                }
-
-                // ----- Tulis users.csv: id,nip,pin,role,fingerprint_id -----
-                // fingerprint_id = slot fp_1 bila ada, else 0.
-                int primaryFpSlot = 0;
-                if (fp1Hex.length() >= 100) primaryFpSlot = fpSlotCounter;
-                tempUsers.printf("%d,%s,%s,%s,%d\n",
-                    userIdCounter, nipStr.c_str(), pinStr.c_str(), role.c_str(), primaryFpSlot);
-                writtenUsers++;
-
-                Serial.printf_P(PSTR("[API] User #%d: NIP=%s role=%s fp1=%dB fp2=%dB\n"),
-                    userIdCounter, nipStr.c_str(), role.c_str(),
-                    fp1Hex.length(), fp2Hex.length());
-
-                // ----- Tulis fingerprint_users.csv: id,user_id,role,data_jari,created_at -----
-                if (fp1Hex.length() >= 100) {
-                    tempFp.printf("%d,%s,%s,%s,%s\n",
-                        fpSlotCounter, nipStr.c_str(), role.c_str(), fp1Hex.c_str(), timestamp.c_str());
-                    fpSlotCounter++;
-                    writtenFps++;
-                }
-                if (fp2Hex.length() >= 100) {
-                    tempFp.printf("%d,%s,%s,%s,%s\n",
-                        fpSlotCounter, nipStr.c_str(), role.c_str(), fp2Hex.c_str(), timestamp.c_str());
-                    fpSlotCounter++;
-                    writtenFps++;
-                }
-
-                userIdCounter++;
-            }
-
-            tempUsers.close();
-            tempFp.close();
-
-            Serial.printf_P(PSTR("[API] HARD SYNC: %d users, %d fingerprints ditulis\n"),
-                writtenUsers, writtenFps);
-
-            // --- 3) Atomic swap: hapus file lama + rename temp ---
-            SD.remove("/users.csv");
-            SD.rename("/temp_users.csv", "/users.csv");
-            SD.remove("/fingerprint_users.csv");
-            SD.rename("/temp_fingerprint_users.csv", "/fingerprint_users.csv");
-
-            Serial.println(F("[API] users.csv + fingerprint_users.csv di-mirror dari server"));
-
-            // Kompatibilitas log: counter delta dipakai ringkasan akhir.
-            int updatedCount = 0;
-            int newUsersAdded = writtenUsers;
-            int userCountLogged = writtenUsers;
-            (void)updatedCount;
-            (void)userCountLogged;
-
-            // WAJIB: Reload RAM - Sync fingerprint data dari CSV yang baru di-update
-            Serial.println("[API] Mereload data fingerprint ke RAM...");
-            fingerprintManager.syncFromCSV(&userManager);
-            Serial.println("[API]Reload RAM selesai - PIN baru siap digunakan");
-
-            // Log to system_log.csv
-            logSystemActivity("API_SYNC", "Users tersinkronisasi. Total: " + String(userCount) + ", Baru: " + String(newUsersAdded));
-
-            lcd.clear();
-            lcd.printLine(0, MSG_API_BERHASIL);
-            lcd.printLine(1, "Users: " + String(userCount));
-            lcd.printLine(2, "Baru: " + String(newUsersAdded));
-            delay(2000);
-
-            http.end();
-            isFetching = false;
-            isSyncUserFailed = false;  // SUKSES (HTTP 200) -> sembunyikan opsi retry
-            syncStatusUsers = true;     // FASE 1 SUKSES -> ikon centang di layar Login
-            return true;
-
-        } else {
-            Serial.printf("[API] HTTP Error: %d\n", httpCode);
-            Serial.println(payload);
-
-            logSystemActivity("API_SYNC_ERROR", "HTTP: " + String(httpCode));
-
-            lcd.printLine(2, "HTTP Error: " + String(httpCode));
-            delay(2000);
-
-            http.end();
-            isFetching = false;
-            return false;
-        }
-    } else {
-        Serial.printf("[API] Request failed: %s\n", http.errorToString(httpCode).c_str());
-
-        logSystemActivity("API_SYNC_ERROR", http.errorToString(httpCode));
-
-        lcd.printLine(2, "Connection Error");
+    if (httpCode != 200) {
+        Serial.printf("[API] FASE 1 gagal: %s\n",
+            httpCode > 0 ? String(httpCode).c_str() : http.errorToString(httpCode).c_str());
+        logSystemActivity("API_SYNC_ERROR", "FASE1 HTTP: " + String(httpCode));
+        lcd.printLine(2, httpCode > 0 ? ("HTTP Error: " + String(httpCode)) : String("Connection Error"));
         delay(2000);
-
         http.end();
         isFetching = false;
         return false;
     }
+
+    String payload = http.getString();
+    http.end();   // tutup TLS lebih awal: bebaskan heap radio sebelum parse + SD
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    payload = String();   // bebaskan buffer mentah; doc sudah menyalin yang perlu
+
+    if (error) {
+        Serial.printf_P(PSTR("[API] FASE 1 JSON Parse Error: %s\n"), error.c_str());
+        lcd.printLine(2, F("JSON Parse Error"));
+        delay(2000);
+        isFetching = false;
+        return false;
+    }
+
+    JsonArray users;
+    if (doc["users"].is<JsonArray>()) {
+        users = doc["users"].as<JsonArray>();
+    } else if (doc["data"].is<JsonArray>()) {
+        users = doc["data"].as<JsonArray>();
+    } else {
+        Serial.println(F("[API] FASE 1: key 'users'/'data' tidak ada"));
+        lcd.printLine(2, F("Invalid Response"));
+        delay(2000);
+        isFetching = false;
+        return false;
+    }
+
+    Serial.printf_P(PSTR("[API] FASE 1: %d users metadata dari server\n"), (int)users.size());
+
+    // --- Muat users.csv lama ke RAM (metadata ringan, aman di heap) ---
+    // Skema: id,nip,pin,role,fingerprint_id,updated_at
+    struct LU { String id, nip, pin, role, fpId, updatedAt; };
+    std::vector<LU> local;
+    int maxId = 0;
+    {
+        File f = SD.open("/users.csv", FILE_READ);
+        if (f) {
+            while (f.available()) {
+                String line = f.readStringUntil('\n');
+                line.trim();
+                if (line.length() < 2) continue;
+                if (line.startsWith("id,")) continue;   // skip header
+
+                String c[6]; int idx = 0, start = 0;
+                for (int i = 0; i <= (int)line.length() && idx < 6; i++) {
+                    if (i == (int)line.length() || line.charAt(i) == ',') {
+                        c[idx++] = line.substring(start, i);
+                        start = i + 1;
+                    }
+                }
+                LU u;
+                u.id = c[0]; u.nip = c[1]; u.pin = c[2];
+                u.role = c[3]; u.fpId = c[4]; u.updatedAt = c[5];
+                u.id.trim(); u.nip.trim(); u.updatedAt.trim();
+                u.updatedAt.replace("\r", "");
+                int v = u.id.toInt(); if (v > maxId) maxId = v;
+                local.push_back(u);
+            }
+            f.close();
+        }
+    }
+
+    auto findLocal = [&](const String& nip) -> int {
+        for (size_t i = 0; i < local.size(); i++) if (local[i].nip == nip) return (int)i;
+        return -1;
+    };
+
+    // --- Loop metadata server: kumpulkan NIP baru/berubah + upsert ke RAM ---
+    String nipsToFetch = "";
+    std::vector<String> targetNips;
+    bool dirty = false;
+
+    for (JsonObject user : users) {
+        String nip = jvToStr(user["nip"]);  nip.trim();
+        if (nip.length() == 0 || nip == "null" || nip == "0") continue;
+
+        String pin = jvToStr(user["pin"]);  pin.trim();
+        String role = jvToStr(user["role"]); role.trim();
+        if (role.length() == 0) role = "dosen";
+        String updServer = jvToStr(user["updated_at"]); updServer.trim();
+
+        int li = findLocal(nip);
+        bool isNew     = (li < 0);
+        bool isChanged = (!isNew) && (local[li].updatedAt != updServer);
+
+        if (!isNew && !isChanged) continue;   // up-to-date -> lewati
+
+        // Tandai untuk pull FP (FASE 2)
+        if (nipsToFetch.length()) nipsToFetch += ",";
+        nipsToFetch += nip;
+        targetNips.push_back(nip);
+
+        // Upsert metadata ke RAM
+        if (isNew) {
+            LU nu;
+            nu.id = String(++maxId);
+            nu.nip = nip; nu.pin = pin; nu.role = role;
+            nu.fpId = "0"; nu.updatedAt = updServer;
+            local.push_back(nu);
+            Serial.printf_P(PSTR("[API] NEW user NIP=%s role=%s\n"), nip.c_str(), role.c_str());
+        } else {
+            local[li].pin = pin;
+            local[li].role = role;
+            local[li].updatedAt = updServer;   // fpId dipertahankan
+            Serial.printf_P(PSTR("[API] UPDATED user NIP=%s\n"), nip.c_str());
+        }
+        dirty = true;
+    }
+
+    doc.clear();   // bebaskan metadata JSON sebelum FASE 2
+
+    // --- Tulis ulang users.csv SEKALI bila ada perubahan (atomic swap) ---
+    if (dirty) {
+        SD.remove("/temp_users.csv");
+        File tw = SD.open("/temp_users.csv", FILE_WRITE);
+        if (!tw) {
+            Serial.println(F("[API] ERROR: gagal buat temp_users.csv"));
+            lcd.printLine(2, F("Error: temp file"));
+            delay(2000);
+            isFetching = false;
+            return false;
+        }
+        tw.println("id,nip,pin,role,fingerprint_id,updated_at");
+        for (auto& u : local) {
+            tw.printf("%s,%s,%s,%s,%s,%s\n",
+                u.id.c_str(), u.nip.c_str(), u.pin.c_str(), u.role.c_str(),
+                u.fpId.length() ? u.fpId.c_str() : "0", u.updatedAt.c_str());
+        }
+        tw.close();
+        SD.remove("/users.csv");
+        SD.rename("/temp_users.csv", "/users.csv");
+        Serial.println(F("[API] users.csv di-upsert (metadata + updated_at)"));
+    }
+
+    // ===================== FASE 2: PULL FINGERPRINT ON-DEMAND =================
+    if (nipsToFetch.length() == 0) {
+        Serial.println(F("[API] Delta Sync: Semua data up-to-date, skip pull FP."));
+        logSystemActivity("API_SYNC", "Delta Sync: up-to-date, skip pull FP");
+        lcd.clear();
+        lcd.printLine(0, MSG_API_BERHASIL);
+        lcd.printLine(1, F("Up-to-date"));
+        delay(1500);
+        isFetching      = false;
+        isSyncUserFailed = false;
+        syncStatusUsers  = true;
+        return true;
+    }
+
+    Serial.printf_P(PSTR("[API] Delta Sync: FASE 2 pull FP utk NIP: %s\n"), nipsToFetch.c_str());
+    lcd.printLine(1, MSG_API_SYNC);
+
+    HTTPClient http2;
+    String url2 = String(API_BASE_URL) + "/api/device/user-fingerprints?nip=" + nipsToFetch;
+    Serial.printf_P(PSTR("[API] FASE 2 URL: %s\n"), url2.c_str());
+
+    http2.begin(secureClient, url2);
+    http2.addHeader("x-device-code",   DEVICE_CODE);
+    http2.addHeader("x-device-secret", DEVICE_SECRET);
+
+    int httpCode2 = http2.GET();
+    Serial.printf_P(PSTR("[API] FASE 2 HTTP Code: %d\n"), httpCode2);
+
+    if (httpCode2 != 200) {
+        // Metadata sudah tersimpan; FP gagal -> laporkan gagal agar bisa retry.
+        Serial.println(F("[API] FASE 2 gagal menarik fingerprint"));
+        logSystemActivity("API_SYNC_ERROR", "FASE2 HTTP: " + String(httpCode2));
+        lcd.printLine(2, "FP Error: " + String(httpCode2));
+        delay(2000);
+        http2.end();
+        isFetching = false;
+        return false;
+    }
+
+    String fpPayload = http2.getString();
+    http2.end();
+
+    JsonDocument fpDoc;
+    error = deserializeJson(fpDoc, fpPayload);
+    fpPayload = String();
+
+    if (error) {
+        Serial.printf_P(PSTR("[API] FASE 2 JSON Parse Error: %s\n"), error.c_str());
+        lcd.printLine(2, F("FP Parse Error"));
+        delay(2000);
+        isFetching = false;
+        return false;
+    }
+
+    JsonArray fps;
+    if      (fpDoc["data"].is<JsonArray>())          fps = fpDoc["data"].as<JsonArray>();
+    else if (fpDoc["users"].is<JsonArray>())         fps = fpDoc["users"].as<JsonArray>();
+    else if (fpDoc["fingerprints"].is<JsonArray>())  fps = fpDoc["fingerprints"].as<JsonArray>();
+    else if (fpDoc.is<JsonArray>())                  fps = fpDoc.as<JsonArray>();
+    else {
+        Serial.println(F("[API] FASE 2: array fingerprint tidak ditemukan"));
+        lcd.printLine(2, F("FP: Invalid Resp"));
+        delay(2000);
+        isFetching = false;
+        return false;
+    }
+
+    Serial.printf_P(PSTR("[API] FASE 2: %d fingerprint records\n"), (int)fps.size());
+
+    // --- Upsert fingerprint_users.csv (atomic swap) ---
+    // Strategi: pertahankan baris user_id yg TIDAK di-update (id slot stabil),
+    // ganti baris untuk NIP target dengan fp_1 + fp_2 yang baru.
+    SD.remove("/temp_fingerprint_users.csv");
+    File tf = SD.open("/temp_fingerprint_users.csv", FILE_WRITE);
+    if (!tf) {
+        Serial.println(F("[API] ERROR: gagal buat temp_fingerprint_users.csv"));
+        lcd.printLine(2, F("Error: temp FP"));
+        delay(2000);
+        isFetching = false;
+        return false;
+    }
+    tf.println("id,user_id,role,data_jari,created_at");
+
+    int maxSlot = 0;
+    // 1) Salin baris lama yg user_id-nya BUKAN target (pertahankan id slot)
+    {
+        File of = SD.open("/fingerprint_users.csv", FILE_READ);
+        if (of) {
+            while (of.available()) {
+                String line = of.readStringUntil('\n');
+                line.trim();
+                if (line.length() < 5) continue;
+                if (line.startsWith("id,")) continue;
+
+                int p1 = line.indexOf(',');
+                int p2 = line.indexOf(',', p1 + 1);
+                if (p1 < 0 || p2 < 0) continue;
+                String slotStr = line.substring(0, p1);
+                String userId  = line.substring(p1 + 1, p2);
+                userId.trim();
+
+                if (nipInList(targetNips, userId)) continue;  // akan ditulis ulang
+
+                tf.println(line);
+                int s = slotStr.toInt(); if (s > maxSlot) maxSlot = s;
+            }
+            of.close();
+        }
+    }
+
+    // 2) Tulis fp_1 + fp_2 baru untuk tiap NIP target
+    String timestamp = isTimeSynced() ? getFormattedTime() : "API_SYNC";
+    int writtenFps = 0;
+    for (JsonObject fp : fps) {
+        String nip = jvToStr(fp["nip"]); nip.trim();
+        if (nip.length() == 0) { nip = jvToStr(fp["user_id"]); nip.trim(); }  // fallback key
+        if (nip.length() == 0) continue;
+
+        String role = jvToStr(fp["role"]); role.trim();
+        if (role.length() == 0) role = "dosen";
+
+        String fp1 = padFpHex(jvToStr(fp["fp_1_user"]));
+        String fp2 = padFpHex(jvToStr(fp["fp_2_user"]));
+        if (fp1.length() == 0) fp1 = padFpHex(jvToStr(fp["fp_user"]));  // fallback skema lama
+
+        if (fp1.length() > 0) {
+            tf.printf("%d,%s,%s,%s,%s\n", ++maxSlot, nip.c_str(), role.c_str(), fp1.c_str(), timestamp.c_str());
+            writtenFps++;
+        }
+        if (fp2.length() > 0) {
+            tf.printf("%d,%s,%s,%s,%s\n", ++maxSlot, nip.c_str(), role.c_str(), fp2.c_str(), timestamp.c_str());
+            writtenFps++;
+        }
+        Serial.printf_P(PSTR("[API] FP upsert NIP=%s fp1=%dB fp2=%dB\n"),
+            nip.c_str(), fp1.length(), fp2.length());
+    }
+    tf.close();
+    fpDoc.clear();
+
+    SD.remove("/fingerprint_users.csv");
+    SD.rename("/temp_fingerprint_users.csv", "/fingerprint_users.csv");
+    Serial.printf_P(PSTR("[API] fingerprint_users.csv di-upsert: %d FP baru\n"), writtenFps);
+
+    // ===================== RELOAD RAM / SENSOR =====================
+    Serial.println(F("[API] Mereload data fingerprint ke RAM/sensor..."));
+    fingerprintManager.syncFromCSV(&userManager);
+    Serial.println(F("[API] Reload RAM selesai"));
+
+    logSystemActivity("API_SYNC",
+        "Delta Sync OK. NIP berubah: " + String((int)targetNips.size()) + ", FP: " + String(writtenFps));
+
+    lcd.clear();
+    lcd.printLine(0, MSG_API_BERHASIL);
+    lcd.printLine(1, "Update: " + String((int)targetNips.size()));
+    lcd.printLine(2, "FP: " + String(writtenFps));
+    delay(2000);
+
+    isFetching      = false;
+    isSyncUserFailed = false;   // SUKSES -> sembunyikan opsi retry
+    syncStatusUsers  = true;    // FASE 1 SUKSES -> ikon centang di layar Login
+    return true;
 }
 
 // ========== TUGAS 2: API LOGIN ==========
@@ -1333,6 +1438,11 @@ bool APIManager::fetchDataMahasiswa(String kode_mk, int kelas) {
     String response = http.getString();
     http.end();
     Serial.printf_P(PSTR("[DPK] Response length: %d\n"), response.length());
+
+    // ========== TAMPILKAN RAW RESPONSE /dpk DI SERIAL MONITOR ==========
+    Serial.println(F("[DPK] ===== RAW JSON RESPONSE ====="));
+    Serial.println(response);
+    Serial.println(F("[DPK] ============================="));
 
     JsonDocument doc;  // v7: heap-elastik
     DeserializationError error = deserializeJson(doc, response);

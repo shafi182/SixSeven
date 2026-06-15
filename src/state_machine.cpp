@@ -4975,6 +4975,37 @@ void StateMachine::update() {
                 needRender = false;
             }
 
+            // ========== OPSI BATAL: interrupt pull FP (dicek tiap re-entry/antar-batch) ==========
+            // Karena state ini kooperatif (1 batch per update()), tombol D terbaca di
+            // sela-sela batch. Request HTTPS yang sedang berjalan tidak bisa dipotong di
+            // tengah, jadi batal efektif setelah batch berjalan selesai (beberapa detik).
+            {
+                char cancelKey = keypad->getKey();
+                if (cancelKey == 'D') {
+                    Serial.println("[PULL_FP] DIBATALKAN oleh user (tombol D)");
+                    logSystemActivity("PRESENSI", "Pull FP dibatalkan user");
+
+                    // Tutup sesi TLS persisten agar socket dibebaskan
+                    apiManager.endBatchPullSession();
+
+                    // Reset flag agar entri berikutnya bersih
+                    isInitialized = false;
+                    pullStarted = false;
+                    nimsCollected = false;
+                    pullIndex = 0;
+                    targetCount = 0;
+
+                    lcd->clear();
+                    lcd->printLine(0, "PULL FP DIBATALKAN");
+                    lcd->printLine(1, "Kembali ke menu...");
+                    delay(1200);
+
+                    currentState = STATE_MENU_DOSEN;
+                    needRender = true;
+                    break;
+                }
+            }
+
             // TUGAS 3: Step 1 - Kumpulkan NIM Target dari kelas_mahasiswa.csv
             if (!isInitialized) {
                 lcd->clear();
@@ -5065,6 +5096,7 @@ void StateMachine::update() {
 
                 lcd->clear();
                 lcd->printLine(0, "Pull FP (" + String(pullIndex + 1) + "/" + String(targetCount) + ")");
+                lcd->printLine(3, F("D.Batal"));
 
                 // Step 1: Build NIM list dibatasi MAX_PULL_BATCH
                 String nimList = "";

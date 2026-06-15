@@ -44,6 +44,23 @@ void setup() {
     Serial.begin(115200);
     while (!Serial) delay(100);
 
+    // ========== DIAGNOSTIK: ALASAN RESET TERAKHIR ==========
+    // Membedakan brownout/power (ESP_RST_BROWNOUT / ESP_RST_POWERON) dari
+    // crash software (ESP_RST_PANIC) atau watchdog (ESP_RST_TASK_WDT/INT_WDT).
+    esp_reset_reason_t resetReason = esp_reset_reason();
+    Serial.printf("[BOOT] Reset reason = %d ", (int)resetReason);
+    switch (resetReason) {
+        case ESP_RST_POWERON:  Serial.println("(POWERON - cold boot / power cycle)"); break;
+        case ESP_RST_BROWNOUT: Serial.println("(BROWNOUT - tegangan turun! cek catu daya)"); break;
+        case ESP_RST_PANIC:    Serial.println("(PANIC - crash software / exception)"); break;
+        case ESP_RST_TASK_WDT: Serial.println("(TASK_WDT - watchdog task)"); break;
+        case ESP_RST_INT_WDT:  Serial.println("(INT_WDT - watchdog interrupt)"); break;
+        case ESP_RST_SW:       Serial.println("(SW - esp_restart)"); break;
+        default:               Serial.println("(lainnya)"); break;
+    }
+    Serial.printf("[BOOT] Free heap awal = %u, blok terbesar = %u\n",
+                  ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+
     // ========== KONFIGURASI PIN SPI (BEFORE SD INIT) ==========
     // Gunakan makro dari config.h (SD_CS, USB_CS, USB_INT)
     pinMode(SD_CS, OUTPUT);
@@ -77,6 +94,12 @@ void setup() {
         lcd.printLine(2, "SD Card Ready");
         logSystemActivity("SD_INIT", "Berhasil - SD Card ready");
     }
+
+    // ========== AUTO-PROVISIONING (Plug-and-Play SD Card) ==========
+    // Buat semua file CSV dasar + header bila SD Card baru/kosong. WAJIB sebelum
+    // baca kredensial WiFi (smartAutoConnect) & local-first fingerprint sync.
+    initSDCardFiles();
+    logSystemActivity("SD_PROVISION", "File dasar SD Card diperiksa/dibuat");
 
     // Init managers (requires SD card)
     fingerprintDataManager.init();
