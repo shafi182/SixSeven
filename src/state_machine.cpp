@@ -5074,9 +5074,10 @@ void StateMachine::update() {
                     // Tidak ada mahasiswa dengan fingerprint
                     lcd->printLine(1, "Tidak ada FP");
                     lcd->printLine(2, "Lewati pull...");
-                    Serial.println("[PULL_FP] Tidak ada mahasiswa dengan fingerprint, skip ke pilih pertemuan");
+                    Serial.println("[PULL_FP] Tidak ada mahasiswa dengan fingerprint, langsung mulai presensi (Auto-Match Jadwal)");
                     delay(1500);
-                    currentState = STATE_PRESENSI_PILIH_PERTEMUAN;
+                    // AUTO-MATCH JADWAL: lewati pemilihan pertemuan -> langsung siapkan sensor
+                    currentState = STATE_PRESENSI_INJECT_SENSOR;
                     needRender = true;
                     break;
                 }
@@ -5549,9 +5550,9 @@ void StateMachine::update() {
                 needRender = true;
             }
             else if (key == 'D') {
-                // Lanjut ke pilih pertemuan
+                // AUTO-MATCH JADWAL: lewati pemilihan pertemuan -> langsung siapkan sensor
                 logSystemActivity("PRESENSI", "Pull FP selesai - Sukses: " + String(retrySuccess) + ", Gagal: " + String(retryFailed));
-                currentState = STATE_PRESENSI_PILIH_PERTEMUAN;
+                currentState = STATE_PRESENSI_INJECT_SENSOR;
                 needRender = true;
             }
         }
@@ -6163,7 +6164,7 @@ void StateMachine::update() {
                 lcd->clear();
                 lcd->printLine(0, "MENYIMPAN DATA...");
                 lcd->printLine(1, "Presensi: " + presensiKodeMk + "-" + presensiKelas);
-                lcd->printLine(2, "Pertemuan: " + presensiPertemuan);
+                lcd->printLine(2, "Hadir: " + String(listHadirCount));
 
                 // Get timestamp
                 String timestamp = apiManager.isTimeSynced() ? getFormattedTime() : "WAKTU_BELUM_SINKRON";

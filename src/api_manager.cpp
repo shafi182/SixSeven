@@ -480,8 +480,10 @@ bool APIManager::fetchUsersAndSync() {
     Serial.printf_P(PSTR("[API] FASE 2: %d fingerprint records\n"), (int)fps.size());
 
     // --- Upsert fingerprint_users.csv (atomic swap) ---
-    // Strategi: pertahankan baris user_id yg TIDAK di-update (id slot stabil),
-    // ganti baris untuk NIP target dengan fp_1 + fp_2 yang baru.
+    // Strategi: tulis ulang seluruh file dengan id (=slot sensor) dinomori ulang
+    // dari 1 secara berurutan -> slot selalu rapat 1..N, tidak pernah drift ke >200.
+    // Baris user_id yg TIDAK di-update disalin apa adanya (hanya id-nya diganti);
+    // baris untuk NIP target ditulis ulang dengan fp_1 + fp_2 yang baru.
     SD.remove("/temp_fingerprint_users.csv");
     File tf = SD.open("/temp_fingerprint_users.csv", FILE_WRITE);
     if (!tf) {
@@ -493,8 +495,8 @@ bool APIManager::fetchUsersAndSync() {
     }
     tf.println("id,user_id,role,data_jari,created_at");
 
-    int maxSlot = 0;
-    // 1) Salin baris lama yg user_id-nya BUKAN target (pertahankan id slot)
+    int slotCounter = 0;   // id berurutan mulai dari 1
+    // 1) Salin baris lama yg user_id-nya BUKAN target (id dinomori ulang)
     {
         File of = SD.open("/fingerprint_users.csv", FILE_READ);
         if (of) {
@@ -507,14 +509,15 @@ bool APIManager::fetchUsersAndSync() {
                 int p1 = line.indexOf(',');
                 int p2 = line.indexOf(',', p1 + 1);
                 if (p1 < 0 || p2 < 0) continue;
-                String slotStr = line.substring(0, p1);
-                String userId  = line.substring(p1 + 1, p2);
+                String userId = line.substring(p1 + 1, p2);
                 userId.trim();
 
                 if (nipInList(targetNips, userId)) continue;  // akan ditulis ulang
 
-                tf.println(line);
-                int s = slotStr.toInt(); if (s > maxSlot) maxSlot = s;
+                // Tulis ulang dgn id baru; pertahankan sisa kolom (user_id,role,data_jari,created_at)
+                tf.print(++slotCounter);
+                tf.print(',');
+                tf.println(line.substring(p1 + 1));
             }
             of.close();
         }
@@ -536,11 +539,11 @@ bool APIManager::fetchUsersAndSync() {
         if (fp1.length() == 0) fp1 = padFpHex(jvToStr(fp["fp_user"]));  // fallback skema lama
 
         if (fp1.length() > 0) {
-            tf.printf("%d,%s,%s,%s,%s\n", ++maxSlot, nip.c_str(), role.c_str(), fp1.c_str(), timestamp.c_str());
+            tf.printf("%d,%s,%s,%s,%s\n", ++slotCounter, nip.c_str(), role.c_str(), fp1.c_str(), timestamp.c_str());
             writtenFps++;
         }
         if (fp2.length() > 0) {
-            tf.printf("%d,%s,%s,%s,%s\n", ++maxSlot, nip.c_str(), role.c_str(), fp2.c_str(), timestamp.c_str());
+            tf.printf("%d,%s,%s,%s,%s\n", ++slotCounter, nip.c_str(), role.c_str(), fp2.c_str(), timestamp.c_str());
             writtenFps++;
         }
         Serial.printf_P(PSTR("[API] FP upsert NIP=%s fp1=%dB fp2=%dB\n"),
@@ -2391,6 +2394,8 @@ void processMahasiswaEnrollmentQueue() {
             http.addHeader("Authorization", "Bearer " + globalJwtToken);
         }
 
+
+        Serial.println("Payload: " + payload);
         int httpCode = http.POST(payload);
         String resp = http.getString();
         Serial.println("[QUEUE_MHSW] Server Response: " + resp);
@@ -2656,35 +2661,56 @@ bool pushPresensiToAPI(int jadwalId, String* listHadir, String* listHadirTime, i
         return false;
     }
 
+    (void)jadwalId;  // AUTO-MATCH JADWAL: backend mencari jadwal_id sendiri dari raw scan
+
     Serial.println("[PUSH_PRESENSI] ============================");
-    Serial.printf("[PUSH_PRESENSI] Sending attendance for %s kelas %d (jadwal %d), count: %d\n", kodeMk.c_str(), kelas, jadwalId, count);
+    Serial.printf("[PUSH_PRESENSI] Auto-Match Jadwal -> %s kelas %d, count: %d\n", kodeMk.c_str(), kelas, count);
 
-    // ========== TUGAS 1: BUILD JSON PAYLOAD DENGAN JsonDocument ==========
-    JsonDocument doc;
-    doc["jadwal_id"] = jadwalId;
-    doc["kode_matkul"] = kodeMk;
-    doc["kelas"] = kelas;
-
-    JsonArray hadir = doc["hadir"].to<JsonArray>();
-    for (int i = 0; i < count; i++) {
-        if (listHadir[i].length() > 0) {
-            hadir.add(listHadir[i]);
-            hadir.add(listHadirTime[i]);
+    // Konversi timestamp lokal "YYYY-MM-DD HH:MM:SS" -> ISO-8601 "YYYY-MM-DDTHH:MM:SSZ".
+    // getTimestamp() memakai waktu WIB; backend mengharapkan format ISO. Bila timestamp
+    // bukan format waktu valid (mis. placeholder "API_DISCONNECTED"), kirim apa adanya.
+    auto toIso8601 = [](String ts) -> String {
+        ts.trim();
+        if (ts.length() == 19 && ts.charAt(10) == ' ') {  // "YYYY-MM-DD HH:MM:SS"
+            ts.setCharAt(10, 'T');
+            ts += "Z";
         }
+        return ts;
+    };
+
+    // ========== BUILD JSON PAYLOAD UNTUK /presensi/raw ==========
+    // { "kode_mk": "...", "kelas": <int>, "scans": [ {"nim","timestamp"}, ... ] }
+    JsonDocument doc;
+    doc["kode_mk"] = kodeMk;
+    doc["kelas"]   = kelas;
+
+    JsonArray scans = doc["scans"].to<JsonArray>();
+    int scanCount = 0;
+    for (int i = 0; i < count; i++) {
+        if (listHadir[i].length() == 0) continue;
+        JsonObject scan = scans.add<JsonObject>();
+        scan["nim"]       = listHadir[i];
+        scan["timestamp"] = toIso8601(listHadirTime[i]);
+        scanCount++;
+    }
+
+    if (scanCount == 0) {
+        Serial.println(F("[PUSH_PRESENSI] Tidak ada scan valid untuk dikirim"));
+        return false;
     }
 
     String payload;
     serializeJson(doc, payload);
 
-    Serial.printf("[PUSH_PRESENSI] Payload size: %d\n", payload.length());
+    Serial.printf("[PUSH_PRESENSI] Payload size: %d (%d scans)\n", payload.length(), scanCount);
     Serial.println(payload);
 
-    // ========== TUGAS 1: HTTP POST ==========
+    // ========== HTTP POST ==========
     WiFiClientSecure secureClient;
     secureClient.setInsecure();
 
     HTTPClient http;
-    String url = "https://presensi-elektronik-ta-2526-016.vercel.app/api/device/kehadiran";
+    String url = String(API_BASE_URL) + "/api/device/presensi/raw";
 
     http.begin(secureClient, url);
     http.setTimeout(15000);  // Beri waktu 15 detik untuk server Vercel memproses
