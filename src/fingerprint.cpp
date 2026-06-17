@@ -1009,13 +1009,15 @@ int FingerprintManager::checkFingerprint() {
 // ========== PRESENSI: FLUSH & INJECT FOR SPECIFIC CLASS ==========
 // Flush sensor + inject Dosen + inject specific class mahasiswa
 // This is called before entering PRESENSI_SCANNING state
-bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String kelas) {
+bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String kelas, String dosenNip) {
     Serial.println(F("=========================================="));
     Serial.println(F("[PRESENSI_INJECT] flushAndInjectPresensiUsers called"));
-    Serial.printf_P(PSTR("[PRESENSI_INJECT] Kelas: %s-%s\n"), kodeKelas.c_str(), kelas.c_str());
+    Serial.printf_P(PSTR("[PRESENSI_INJECT] Kelas: %s-%s | Dosen: %s\n"),
+        kodeKelas.c_str(), kelas.c_str(), dosenNip.c_str());
 
     kodeKelas.trim();
     kelas.trim();
+    dosenNip.trim();
 
     // ========== STEP A: FLUSH SENSOR (MUTLAK) ==========
     Serial.println(F("[PRESENSI_INJECT] ======================================="));
@@ -1072,16 +1074,21 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
         fingerMap[i] = "";
     }
 
-    // ========== STEP B: INJECT DOSEN (Slots 1-2) ==========
+    // ========== STEP B: INJECT DOSEN YANG LOGIN (Slots 1-2) ==========
+    // PENTING: inject sidik jari milik DOSEN YANG SEDANG LOGIN (match user_id == dosenNip),
+    // BUKAN sekadar baris ber-id<=2. AUTH_START membandingkan fingerMap[slot] terhadap NIP
+    // dosen login; jika FP dosen tsb tidak ter-inject ke slot 1-2, otorisasi FP start/stop
+    // gagal total (hanya PIN yang jalan). Maks 2 jari -> slot 1 lalu slot 2.
     Serial.println(F("[PRESENSI_INJECT] ======================================="));
-    Serial.println(F("[PRESENSI_INJECT] STEP B: INJECT DOSEN (Slots 1-2)..."));
+    Serial.printf_P(PSTR("[PRESENSI_INJECT] STEP B: INJECT DOSEN LOGIN %s (Slots 1-2)...\n"), dosenNip.c_str());
 
     int dosenInjected = 0;
+    int dosenSlot = 1;   // dosen login menempati slot 1-2
     File f = SD.open("/fingerprint_users.csv", FILE_READ);
     if (f) {
         if (f.available()) f.readStringUntil('\n'); // Skip header
 
-        while (f.available()) {
+        while (f.available() && dosenSlot <= 2) {
             String line = f.readStringUntil('\n');
             line.trim();
             if (line.length() < 10) continue;
@@ -1093,21 +1100,19 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
             int p4 = line.indexOf(',', p3 + 1);
             if (p1 <= 0 || p2 <= 0 || p3 <= 0 || p4 <= 0) continue;
 
-            int slot = line.substring(0, p1).toInt();
             String userId = line.substring(p1 + 1, p2);
-            String role = line.substring(p2 + 1, p3);
             String hexData = line.substring(p3 + 1, p4);
-
             userId.trim();
-            role.trim();
             hexData.trim();
 
-            // Hanya inject slot 1-2 (Dosen/Admin)
-            if (slot > 0 && slot <= 2 && hexData.length() >= 1000) {
-                if (injectSingleFingerprint(userId, hexData, slot)) {
-                    dosenInjected++;
-                    Serial.printf_P(PSTR("[PRESENSI_INJECT] Injected Dosen: %s ke slot %d\n"), userId.c_str(), slot);
-                }
+            // Hanya FP milik dosen yang sedang login
+            if (userId != dosenNip) continue;
+            if (hexData.length() < 1000) continue;
+
+            if (injectSingleFingerprint(userId, hexData, dosenSlot)) {
+                dosenInjected++;
+                Serial.printf_P(PSTR("[PRESENSI_INJECT] Injected Dosen: %s ke slot %d\n"), userId.c_str(), dosenSlot);
+                dosenSlot++;   // jari berikutnya -> slot 2
             }
         }
         f.close();
@@ -1115,7 +1120,7 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
         Serial.println(F("[PRESENSI_INJECT] ERROR: fingerprint_users.csv tidak ditemukan"));
     }
 
-    Serial.printf_P(PSTR("[PRESENSI_INJECT] Dosen injected: %d\n"), dosenInjected);
+    Serial.printf_P(PSTR("[PRESENSI_INJECT] Dosen injected: %d (NIP %s)\n"), dosenInjected, dosenNip.c_str());
 
     // ========== STEP C: INJECT MAHASISWA KELAS TERPILIH ==========
     Serial.println(F("[PRESENSI_INJECT] ======================================="));

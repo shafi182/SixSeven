@@ -54,7 +54,7 @@ void initSDCardFiles() {
 
     // --- Kelas & relasi ---
     ensureCSVFile("/kelas.csv",                 "kode_kelas,nama_kelas");
-    ensureCSVFile("/dosen_kelas.csv",           "id,nip,kode_kelas");
+    ensureCSVFile("/dosen_kelas.csv",           "id,nip,kode_kelas,kelas,kelas_id");
     ensureCSVFile("/kelas_mahasiswa.csv",       "id,kode_kelas,kelas,nim,sit_in,status_fingerprint");
     ensureCSVFile("/pertemuan.csv",             "id,server_jadwal_id,kode_kelas,kelas,pertemuan_ke,tanggal");
 

@@ -135,7 +135,7 @@ String findFingerprintByNimOld(String nim);
 bool pushSingleFingerprint(String nim, String hexData);
 
 // ========== TUGAS 1: PUSH PRESENSI TO SERVER ==========
-bool pushPresensiToAPI(int jadwalId, String* listHadir, String* listHadirTime, int count, String kodeMk, int kelas);
+bool pushPresensiToAPI(String kelasId, String* listHadir, String* listHadirTime, int count);
 
 // ========== TUGAS 1: BATCH PUSH - SIMPAN KE PENDING QUEUE ==========
 void addToPendingPushQueue(String nim, String hexData);

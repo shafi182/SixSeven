@@ -105,7 +105,8 @@ public:
     String extractTemplateAsHex(int slotId);
 
     // ========== PRESENSI: FLUSH & INJECT FOR SPECIFIC CLASS ==========
-    // Flush sensor + inject Dosen + inject specific class mahasiswa
-    // Returns true if successful
-    bool flushAndInjectPresensiUsers(String kodeKelas, String kelas);
+    // Flush sensor + inject sidik jari DOSEN YANG LOGIN (slot 1-2) + mahasiswa kelas ini.
+    // dosenNip = NIP dosen yang sedang login; FP-nya di-inject ke slot 1-2 agar otorisasi
+    // FP (start/stop presensi) cocok. Returns true if successful.
+    bool flushAndInjectPresensiUsers(String kodeKelas, String kelas, String dosenNip);
 };

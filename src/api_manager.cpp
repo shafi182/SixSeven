@@ -1252,36 +1252,33 @@ void APIManager::processDashboardData(String jsonPayload) {
         JsonArray kelasArray = doc["kelas"].as<JsonArray>();
         Serial.println("[SYNC] Jumlah kelas: " + String(kelasArray.size()));
 
+        // Kumpulan relasi dosen-kelas dari dashboard (untuk mirror dosen_kelas.csv).
+        // Skema baru: kelas membawa kelas_id; jadwal/pertemuan sudah dihapus dari API.
+        std::vector<String> dkKode, dkKelas, dkKelasId;
+
         int kelasIdx = 0;
         for (JsonObject kelasObj : kelasArray) {
             kelasIdx++;
             String kode_mk = kelasObj["kode_mk"] | "";
             String nama_mk = kelasObj["nama_mk"] | "";
-            // ========== TUGAS 3: HANDLE JSON NULL MENJADI TEKS "NULL" ==========
-            // Deteksi NULL eksplisit untuk sks
-            String sksVal = "NULL";
-            if (!kelasObj["sks"].isNull()) {
-                sksVal = kelasObj["sks"].as<String>();
-            }
-            // ========== TUGAS: EKSTRAK VARIABEL KELAS ==========
+            // ========== EKSTRAK VARIABEL KELAS + kelas_id ==========
             String kelas = "";
-            if (!kelasObj["kelas"].isNull()) {
-                kelas = kelasObj["kelas"].as<String>();
-            }
+            if (!kelasObj["kelas"].isNull()) kelas = kelasObj["kelas"].as<String>();
+            String kelasId = "";
+            if (!kelasObj["kelas_id"].isNull()) kelasId = kelasObj["kelas_id"].as<String>();
+            kode_mk.trim(); kelas.trim(); kelasId.trim();
 
-            Serial.println("[SYNC] Kelas[" + String(kelasIdx) + "]: kode_mk=" + kode_mk + ", nama=" + nama_mk + ", kelas=" + kelas + ", sks=" + sksVal);
+            Serial.println("[SYNC] Kelas[" + String(kelasIdx) + "]: kelas_id=" + kelasId +
+                           ", kode_mk=" + kode_mk + ", nama=" + nama_mk + ", kelas=" + kelas);
 
-            // ke kelas.csv
+            // ke kelas.csv (master matkul). Skema lama: kode_mk,kelas,nama_mk,sks.
+            // API baru tidak mengirim sks -> tulis "NULL" agar kolom tetap konsisten.
             if (kode_mk.length() > 0 && kelas.length() > 0) {
-                // Cek berdasarkan kode_mk (kolom 0) + kelas (kolom 1) kombinasi
                 bool existsKelas = isRecordExists("/kelas.csv", kode_mk, 0, kelas, 1);
-                Serial.println("[SYNC]   Cek kelas.csv, kode_mk=" + kode_mk + ", kelas=" + kelas + ", exists=" + String(existsKelas));
-
                 if (!existsKelas) {
                     File file = SD.open("/kelas.csv", FILE_APPEND);
                     if (file) {
-                        // Format baru: kode_mk,kelas,nama_mk,sks
-                        file.printf("%s,%s,%s,%s\n", kode_mk.c_str(), kelas.c_str(), nama_mk.c_str(), sksVal.c_str());
+                        file.printf("%s,%s,%s,NULL\n", kode_mk.c_str(), kelas.c_str(), nama_mk.c_str());
                         file.close();
                         Serial.println("[SYNC]   BERHASIL append kelas.csv: " + kode_mk + " Kelas " + kelas);
                     }
@@ -1290,24 +1287,54 @@ void APIManager::processDashboardData(String jsonPayload) {
                 }
             }
 
-            // ke dosen_kelas.csv (relasi dosen dengan kelas)
+            // Kumpulkan untuk mirror dosen_kelas.csv (termasuk kelas_id)
             if (kode_mk.length() > 0 && kelas.length() > 0 && lecturerNIP.length() > 0) {
-                // Cek berdasarkan kode_kelas (kolom 2) + kelas (kolom 3) kombinasi
-                bool existsRel = isRecordExists("/dosen_kelas.csv", kode_mk, 2, kelas, 3);
-                Serial.println("[SYNC]   Cek dosen_kelas.csv, kode_mk=" + kode_mk + ", kelas=" + kelas + ", exists=" + String(existsRel));
+                dkKode.push_back(kode_mk);
+                dkKelas.push_back(kelas);
+                dkKelasId.push_back(kelasId);
+            }
+        }
 
-                if (!existsRel) {
-                    File file = SD.open("/dosen_kelas.csv", FILE_APPEND);
-                    if (file) {
-                        // Format baru: id,nip,kode_kelas,kelas
-                        file.printf("%d,%s,%s,%s\n", nextDosenKelasId, lecturerNIP.c_str(), kode_mk.c_str(), kelas.c_str());
-                        file.close();
-                        Serial.printf("[SYNC]   BERHASIL append dosen_kelas.csv: ID %d\n", nextDosenKelasId);
-                        nextDosenKelasId++;  // Increment untuk ID berikutnya
-                    }
-                } else {
-                    Serial.println("[SYNC]   Skip dosen_kelas.csv - relasi sudah ada");
+        // ===== MIRROR dosen_kelas.csv UNTUK lecturerNIP =====
+        // Tulis ulang relasi milik NIP ini dari nol (dosen lain dipertahankan), agar
+        // kelas_id SELALU ter-update walau relasi (kode+kelas) sudah pernah ada.
+        // Skema baru: id,nip,kode_kelas,kelas,kelas_id
+        if (lecturerNIP.length() > 0) {
+            std::vector<String> keep;   // baris milik dosen LAIN (verbatim)
+            int maxId = 0;
+            File rf = SD.open("/dosen_kelas.csv", FILE_READ);
+            if (rf) {
+                if (rf.available()) rf.readStringUntil('\n');   // skip header
+                while (rf.available()) {
+                    String line = rf.readStringUntil('\n');
+                    line.trim(); line.replace("\r", "");
+                    if (line.length() < 3) continue;
+                    int q1 = line.indexOf(',');
+                    int q2 = line.indexOf(',', q1 + 1);
+                    if (q1 < 0 || q2 < 0) continue;
+                    String rowNip = line.substring(q1 + 1, q2); rowNip.trim();
+                    int rowId = line.substring(0, q1).toInt();
+                    if (rowId > maxId) maxId = rowId;
+                    if (rowNip != lecturerNIP) keep.push_back(line);   // dosen lain -> simpan
                 }
+                rf.close();
+            }
+
+            SD.remove("/dosen_kelas.csv");
+            File wf = SD.open("/dosen_kelas.csv", FILE_WRITE);
+            if (wf) {
+                wf.println("id,nip,kode_kelas,kelas,kelas_id");
+                for (auto& l : keep) wf.println(l);   // dosen lain (id lama dipertahankan)
+                int id = maxId + 1;
+                for (size_t i = 0; i < dkKode.size(); i++) {
+                    wf.printf("%d,%s,%s,%s,%s\n", id++, lecturerNIP.c_str(),
+                        dkKode[i].c_str(), dkKelas[i].c_str(), dkKelasId[i].c_str());
+                    Serial.println("[SYNC]   dosen_kelas: " + dkKode[i] + "-" + dkKelas[i] +
+                                   " kelas_id=" + dkKelasId[i]);
+                }
+                wf.close();
+                Serial.printf("[SYNC]   dosen_kelas.csv di-mirror utk NIP %s: %d relasi\n",
+                    lecturerNIP.c_str(), (int)dkKode.size());
             }
         }
     } else {
@@ -2650,21 +2677,19 @@ bool pushSingleFingerprint(String nim, String hexData) {
     return success;
 }
 
-bool pushPresensiToAPI(int jadwalId, String* listHadir, String* listHadirTime, int count, String kodeMk, int kelas) {
+bool pushPresensiToAPI(String kelasId, String* listHadir, String* listHadirTime, int count) {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[PUSH_PRESENSI] WiFi not connected");
         return false;
     }
 
-    if (kodeMk.length() == 0 || count <= 0) {
-        Serial.println("[PUSH_PRESENSI] Error: kodeMk atau count tidak valid");
+    if (kelasId.length() == 0 || count <= 0) {
+        Serial.println("[PUSH_PRESENSI] Error: kelas_id atau count tidak valid");
         return false;
     }
 
-    (void)jadwalId;  // AUTO-MATCH JADWAL: backend mencari jadwal_id sendiri dari raw scan
-
     Serial.println("[PUSH_PRESENSI] ============================");
-    Serial.printf("[PUSH_PRESENSI] Auto-Match Jadwal -> %s kelas %d, count: %d\n", kodeMk.c_str(), kelas, count);
+    Serial.printf("[PUSH_PRESENSI] Auto-Match Jadwal -> kelas_id %s, count: %d\n", kelasId.c_str(), count);
 
     // Konversi timestamp lokal "YYYY-MM-DD HH:MM:SS" -> ISO-8601 "YYYY-MM-DDTHH:MM:SSZ".
     // getTimestamp() memakai waktu WIB; backend mengharapkan format ISO. Bila timestamp
@@ -2678,11 +2703,10 @@ bool pushPresensiToAPI(int jadwalId, String* listHadir, String* listHadirTime, i
         return ts;
     };
 
-    // ========== BUILD JSON PAYLOAD UNTUK /presensi/raw ==========
-    // { "kode_mk": "...", "kelas": <int>, "scans": [ {"nim","timestamp"}, ... ] }
+    // ========== BUILD JSON PAYLOAD UNTUK /kehadiran ==========
+    // { "kelas_id": "<id>", "scans": [ {"nim","timestamp"}, ... ] }
     JsonDocument doc;
-    doc["kode_mk"] = kodeMk;
-    doc["kelas"]   = kelas;
+    doc["kelas_id"] = kelasId;
 
     JsonArray scans = doc["scans"].to<JsonArray>();
     int scanCount = 0;
@@ -2710,7 +2734,7 @@ bool pushPresensiToAPI(int jadwalId, String* listHadir, String* listHadirTime, i
     secureClient.setInsecure();
 
     HTTPClient http;
-    String url = String(API_BASE_URL) + "/api/device/presensi/raw";
+    String url = String(API_BASE_URL) + "/api/device/kehadiran";
 
     http.begin(secureClient, url);
     http.setTimeout(15000);  // Beri waktu 15 detik untuk server Vercel memproses

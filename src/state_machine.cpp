@@ -82,7 +82,8 @@ extern String globalJwtToken;  // TUGAS 3: Untuk pull fingerprint
 // (berdasarkan NIP), TANPA syarat punya jadwal/pertemuan. Filter pertemuan hanya
 // relevan saat memilih PERTEMUAN (STATE_PRESENSI_PILIH_PERTEMUAN), bukan saat pilih kelas.
 // Format dosen_kelas.csv: id,nip,kode_kelas,kelas
-int loadKelasByNIP(String nip, String kodeList[], String kelasList[], int maxCount) {
+int loadKelasByNIP(String nip, String kodeList[], String kelasList[], int maxCount,
+                   String kelasIdList[] = nullptr) {
     int count = 0;
 
     // Normalisasi NIP target sekali di awal (tahan spasi / CR sisa)
@@ -134,6 +135,18 @@ int loadKelasByNIP(String nip, String kodeList[], String kelasList[], int maxCou
             kelas.replace("\n", "");
             kelas.replace(" ", "");
 
+            // kelas_id ada di kolom ke-5 (setelah koma ke-4). Skema baru:
+            // id,nip,kode_kelas,kelas,kelas_id
+            String kelasId = "";
+            if (p4 > 0) {
+                int p5 = line.indexOf(',', p4 + 1);
+                kelasId = (p5 > 0) ? line.substring(p4 + 1, p5) : line.substring(p4 + 1);
+                kelasId.trim();
+                kelasId.replace("\r", "");
+                kelasId.replace("\n", "");
+                kelasId.replace(" ", "");
+            }
+
             rowSeen++;
             // DEBUG: cetak SETIAP baris + status match -> mudah lihat apakah EL1111
             // memang ada di dosen_kelas.csv atau tidak (akar masalah ada di sini).
@@ -146,6 +159,7 @@ int loadKelasByNIP(String nip, String kodeList[], String kelasList[], int maxCou
             if (match) {
                 kodeList[count] = kodeMk;
                 kelasList[count] = kelas;
+                if (kelasIdList != nullptr) kelasIdList[count] = kelasId;
                 count++;
             }
         }
@@ -232,6 +246,8 @@ State wifiReturnState = STATE_MENU_ADMIN_PAGE4_2;  // Default kembali ke menu Ad
 // ========== TUGAS 4 & 5: PRESENSI SESSION VARIABLES ==========
 static String presensiKodeMk = "";
 static String presensiKelas = "";
+// kelas_id server untuk push presensi ke /api/device/kehadiran (Auto-Match Jadwal).
+static String presensiKelasId = "";
 static String presensiPertemuan = "";
 static String presensiTanggal = "";
 int presensiJadwalId = 0;  // Non-static agar bisa diakses dari api_manager.cpp
@@ -4692,6 +4708,7 @@ void StateMachine::update() {
             static int currentPage = 0;
             static String classListKode[20];
             static String classListKelas[20];
+            static String classListKelasId[20];   // kelas_id server (untuk push /kehadiran)
             static int classCount = 0;
             static int classEnrolled[20];
             static int classTotal[20];
@@ -4716,7 +4733,7 @@ void StateMachine::update() {
                 classCount = 0;
 
                 // ========== LOAD KELAS MENGGUNAKAN HELPER FUNCTION ==========
-                classCount = loadKelasByNIP(tempNIP, classListKode, classListKelas, 20);
+                classCount = loadKelasByNIP(tempNIP, classListKode, classListKelas, 20, classListKelasId);
 
                 if (classCount == 0) {
                     lcd->clear();
@@ -4858,10 +4875,13 @@ void StateMachine::update() {
                         // ========== TUGAS 3: TRIM SETELAH PENGATURAN ==========
                         presensiKodeMk = classListKode[selectedIdx];
                         presensiKelas = classListKelas[selectedIdx];
+                        presensiKelasId = classListKelasId[selectedIdx];
                         presensiKodeMk.trim(); presensiKodeMk.replace("\r", "");
                         presensiKelas.trim(); presensiKelas.replace("\r", "");
+                        presensiKelasId.trim(); presensiKelasId.replace("\r", "");
 
-                        Serial.printf("[PILIH_KELAS] Selected: kodeMk=%s, kelas=%s\n", presensiKodeMk.c_str(), presensiKelas.c_str());
+                        Serial.printf("[PILIH_KELAS] Selected: kodeMk=%s, kelas=%s, kelas_id=%s\n",
+                            presensiKodeMk.c_str(), presensiKelas.c_str(), presensiKelasId.c_str());
 
                         logSystemActivity("PRESENSI", "Kelas dipilih: " + presensiKodeMk + "-" + presensiKelas + " (Input: " + tempInput + ")");
 
@@ -5569,7 +5589,7 @@ void StateMachine::update() {
             lcd->printLine(2, F("Mohon tunggu"));
 
             // Urutan ketat: Empty Library -> Inject Dosen (1-2) -> Inject Mahasiswa (3 dst)
-            bool prepResult = fingerprintManager.flushAndInjectPresensiUsers(presensiKodeMk, presensiKelas);
+            bool prepResult = fingerprintManager.flushAndInjectPresensiUsers(presensiKodeMk, presensiKelas, tempNIP);
 
             if (prepResult) {
                 Serial.println(F("[PRESENSI] Sensor preparation SUCCESS"));
@@ -6208,8 +6228,8 @@ void StateMachine::update() {
                 lcd->printLine(0, "MENGIRIM DATA...");
                 lcd->printLine(1, "Mohon Tunggu");
 
-                // Try to push to server
-                pushSuccess = pushPresensiToAPI(presensiJadwalId, listHadir, listHadirTime, listHadirCount, presensiKodeMk, presensiKelas.toInt());
+                // Try to push to server (Auto-Match Jadwal: pakai kelas_id)
+                pushSuccess = pushPresensiToAPI(presensiKelasId, listHadir, listHadirTime, listHadirCount);
 
                 pushCompleted = true;
 
@@ -6240,8 +6260,8 @@ void StateMachine::update() {
                     lcd->printLine(0, "MENGIRIM ULANG...");
                     lcd->printLine(1, "Mohon Tunggu");
 
-                    // Try push again
-                    pushSuccess = pushPresensiToAPI(presensiJadwalId, listHadir, listHadirTime, listHadirCount, presensiKodeMk, presensiKelas.toInt());
+                    // Try push again (Auto-Match Jadwal: pakai kelas_id)
+                    pushSuccess = pushPresensiToAPI(presensiKelasId, listHadir, listHadirTime, listHadirCount);
 
                     if (pushSuccess) {
                         // ========== TUGAS 3: BERHASIL - TIDAK PERLU CLEAR ==========
@@ -6280,6 +6300,7 @@ void StateMachine::update() {
 
                 presensiKodeMk = "";
                 presensiKelas = "";
+                presensiKelasId = "";
                 presensiPertemuan = "";
                 presensiTanggal = "";
                 presensiJadwalId = 0;
