@@ -684,67 +684,15 @@ void FingerprintManager::resetScan() {
 // Returns: true if successful, false if flush failed
 bool FingerprintManager::syncFromCSV(UserManager* userManager) {
     Serial.println(F("=========================================="));
-    Serial.println(F("[SYNC] syncFromCSV called"));
+    Serial.println(F("[SYNC] syncFromCSV called (Delta Sync)"));
 
-    // ========== STEP 1: FORCE FLUSH (WAJIB) ==========
+    // TUGAS BARU: Smart Sync tanpa memusnahkan Mahasiswa
+    // Jangan lakukan empty_library() karena itu akan menghapus cache presensi (fingerMap).
+    // Sebagai gantinya, cukup inject data dari fingerprint_users.csv.
+    // Metode injectSingleFingerprint secara otomatis akan menimpa slot yang sudah ada.
+
     Serial.println(F("[SYNC] ======================================="));
-    Serial.println(F("[SYNC] STEP 1: FORCE FLUSH SENSOR..."));
-    Serial.println(F("[SYNC] Mengeksekusi empty_library()..."));
-
-    bool flushSuccess = false;
-    int flushRetry = 0;
-    const int MAX_FLUSH_RETRY = 3;
-
-    while (flushRetry < MAX_FLUSH_RETRY && !flushSuccess) {
-        // Eksekusi empty_library()
-        uint8_t flushResult = finger->empty_library();
-
-        if (flushResult == FP_OK) {
-            Serial.println(F("[SYNC] empty_library OK"));
-        } else {
-            Serial.printf_P(PSTR("[SYNC] empty_library error: %d\n"), flushResult);
-        }
-
-        // Validasi: wajib cek template_count
-        delay(50);
-        finger->count_templates();
-        int templateCount = finger->template_count;
-
-        if (templateCount == 0) {
-            flushSuccess = true;
-            Serial.println(F("[SYNC] Flush validated: sensor KOSONG"));
-        } else {
-            flushRetry++;
-            Serial.printf_P(PSTR("[SYNC] Flush retry %d/%d: template_count=%d\n"),
-                          flushRetry, MAX_FLUSH_RETRY, templateCount);
-
-            if (flushRetry < MAX_FLUSH_RETRY) {
-                // Force delete per-slot sebagai backup
-                for (int d = 1; d <= 200; d++) {
-                    finger->delete_model(d);
-                }
-                delay(100);
-            }
-        }
-    }
-
-    // Verifikasi akhir sebelum proceed
-    finger->count_templates();
-    int finalCount = finger->template_count;
-    Serial.printf_P(PSTR("[SYNC] Pre-inject: %d templates\n"), finalCount);
-
-    // JIKA FLUSH GAGAL -> ABORT
-    if (!flushSuccess && finalCount > 0) {
-        Serial.println(F("[SYNC] ERROR: Flush failed - ABORT sync!"));
-        Serial.println(F("=========================================="));
-        return false;
-    }
-
-    Serial.println(F("[SYNC] Flush OK - proceeding to inject..."));
-
-    // ========== STEP 2: INJECT FROM CSV ==========
-    Serial.println(F("[SYNC] ======================================="));
-    Serial.println(F("[SYNC] STEP 2: INJECT FROM CSV..."));
+    Serial.println(F("[SYNC] STEP 1: INJECT ADMIN/DOSEN FROM CSV..."));
 
     int totalInjected = 0;
 
@@ -1024,7 +972,7 @@ int FingerprintManager::checkFingerprint() {
 // This is called before entering PRESENSI_SCANNING state
 bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String kelas, String dosenNip) {
     Serial.println(F("=========================================="));
-    Serial.println(F("[PRESENSI_INJECT] flushAndInjectPresensiUsers called"));
+    Serial.println(F("[PRESENSI_INJECT] flushAndInjectPresensiUsers called (Smart Inject)"));
     Serial.printf_P(PSTR("[PRESENSI_INJECT] Kelas: %s-%s | Dosen: %s\n"),
         kodeKelas.c_str(), kelas.c_str(), dosenNip.c_str());
 
@@ -1032,128 +980,17 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
     kelas.trim();
     dosenNip.trim();
 
-    // ========== STEP A: FLUSH SENSOR (MUTLAK) ==========
-    Serial.println(F("[PRESENSI_INJECT] ======================================="));
-    Serial.println(F("[PRESENSI_INJECT] STEP A: FLUSH SENSOR..."));
-
-    bool flushSuccess = false;
-    int flushRetry = 0;
-    const int MAX_FLUSH_RETRY = 3;
-
-    while (flushRetry < MAX_FLUSH_RETRY && !flushSuccess) {
-        uint8_t flushResult = finger->empty_library();
-        if (flushResult == FP_OK) {
-            Serial.println(F("[PRESENSI_INJECT] empty_library OK"));
-        } else {
-            Serial.printf_P(PSTR("[PRESENSI_INJECT] empty_library error: %d\n"), flushResult);
-        }
-
-        delay(50);
-        finger->count_templates();
-        int templateCount = finger->template_count;
-
-        if (templateCount == 0) {
-            flushSuccess = true;
-            Serial.println(F("[PRESENSI_INJECT] Flush validated: sensor KOSONG"));
-        } else {
-            flushRetry++;
-            Serial.printf_P(PSTR("[PRESENSI_INJECT] Flush retry %d/%d: template_count=%d\n"),
-                flushRetry, MAX_FLUSH_RETRY, templateCount);
-
-            if (flushRetry < MAX_FLUSH_RETRY) {
-                // Force delete per-slot sebagai backup
-                for (int d = 1; d <= 200; d++) {
-                    finger->delete_model(d);
-                }
-                delay(100);
-            }
-        }
-    }
-
-    finger->count_templates();
-    int finalCount = finger->template_count;
-    Serial.printf_P(PSTR("[PRESENSI_INJECT] Pre-inject: %d templates\n"), finalCount);
-
-    if (!flushSuccess && finalCount > 0) {
-        Serial.println(F("[PRESENSI_INJECT] ERROR: Flush failed - ABORT!"));
-        Serial.println(F("=========================================="));
-        return false;
-    }
-
-    Serial.println(F("[PRESENSI_INJECT] Flush OK - proceeding to inject..."));
-
-    // ========== CLEAR FINGERMAP RAM ==========
-    for (int i = 0; i <= 200; i++) {
-        fingerMap[i] = "";
-    }
-
-    // ========== STEP B: INJECT DOSEN YANG LOGIN (Slots 1-2) ==========
-    // PENTING: inject sidik jari milik DOSEN YANG SEDANG LOGIN (match user_id == dosenNip),
-    // BUKAN sekadar baris ber-id<=2. AUTH_START membandingkan fingerMap[slot] terhadap NIP
-    // dosen login; jika FP dosen tsb tidak ter-inject ke slot 1-2, otorisasi FP start/stop
-    // gagal total (hanya PIN yang jalan). Maks 2 jari -> slot 1 lalu slot 2.
-    Serial.println(F("[PRESENSI_INJECT] ======================================="));
-    Serial.printf_P(PSTR("[PRESENSI_INJECT] STEP B: INJECT DOSEN LOGIN %s (Slots 1-2)...\n"), dosenNip.c_str());
-
-    int dosenInjected = 0;
-    int dosenSlot = 1;   // dosen login menempati slot 1-2
-    File f = SD.open("/fingerprint_users.csv", FILE_READ);
-    if (f) {
-        if (f.available()) f.readStringUntil('\n'); // Skip header
-
-        while (f.available() && dosenSlot <= 2) {
-            String line = f.readStringUntil('\n');
-            line.trim();
-            if (line.length() < 10) continue;
-            if (line.startsWith(F("id,")) || line.startsWith(F("id,user"))) continue;
-
-            int p1 = line.indexOf(',');
-            int p2 = line.indexOf(',', p1 + 1);
-            int p3 = line.indexOf(',', p2 + 1);
-            int p4 = line.indexOf(',', p3 + 1);
-            if (p1 <= 0 || p2 <= 0 || p3 <= 0 || p4 <= 0) continue;
-
-            String userId = line.substring(p1 + 1, p2);
-            String hexData = line.substring(p3 + 1, p4);
-            userId.trim();
-            hexData.trim();
-
-            // Hanya FP milik dosen yang sedang login
-            if (userId != dosenNip) continue;
-            if (hexData.length() < 1000) continue;
-
-            if (injectSingleFingerprint(userId, hexData, dosenSlot)) {
-                dosenInjected++;
-                Serial.printf_P(PSTR("[PRESENSI_INJECT] Injected Dosen: %s ke slot %d\n"), userId.c_str(), dosenSlot);
-                dosenSlot++;   // jari berikutnya -> slot 2
-            }
-        }
-        f.close();
-    } else {
-        Serial.println(F("[PRESENSI_INJECT] ERROR: fingerprint_users.csv tidak ditemukan"));
-    }
-
-    Serial.printf_P(PSTR("[PRESENSI_INJECT] Dosen injected: %d (NIP %s)\n"), dosenInjected, dosenNip.c_str());
-
-    // ========== STEP C: INJECT MAHASISWA KELAS TERPILIH ==========
-    Serial.println(F("[PRESENSI_INJECT] ======================================="));
-    Serial.println(F("[PRESENSI_INJECT] STEP C: INJECT MAHASISWA KELAS TERPILIH..."));
-
-    int mhsInjected = 0;
-
-    // Step C1: Kumpulkan NIM dari kelas_mahasiswa.csv untuk kelas ini
+    // ========== STEP 1: Kumpulkan NIM Kelas ==========
     std::vector<String> classNims;
     File kmFile = SD.open("/kelas_mahasiswa.csv", FILE_READ);
     if (kmFile) {
         if (kmFile.available()) kmFile.readStringUntil('\n'); // Skip header
-
         while (kmFile.available()) {
             String line = kmFile.readStringUntil('\n');
             line.trim();
             if (line.length() < 5) continue;
             if (line.startsWith("id,") || line.startsWith("id,kode")) continue;
 
-            // Format: id,kode_kelas,kelas,nim,sit_in,status_fingerprint
             int p1 = line.indexOf(',');
             int p2 = line.indexOf(',', p1 + 1);
             int p3 = line.indexOf(',', p2 + 1);
@@ -1180,31 +1017,161 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
     Serial.printf_P(PSTR("[PRESENSI_INJECT] Ditemukan %d NIM untuk kelas %s-%s\n"),
         classNims.size(), kodeKelas.c_str(), kelas.c_str());
 
-    // ========== BAGIAN 1: ADAPTIVE LOADING ==========
-    // Kapasitas sensor R503 = 200 slot. Slot 1-2 = dosen, sisa 198 utk mahasiswa.
-    //   - Kelas <= 99 mhs : inject fp_1 + fp_2 (2 slot/mhs) -> 99*2 = 198 slot (pas).
-    //   - Kelas  > 99 mhs : inject fp_1 SAJA (1 slot/mhs) agar tidak Overcapacity (0x0B).
-    //                       fp_2 tetap tersedia via sidecar utk Presensi Cadangan (on-demand).
+    // Adaptive mode
     bool injectDual = (classNims.size() <= 99);
-    // Flag global: kelas > 99 -> mode adaptif (fp_2 tdk diinjeksi) -> menu Jari Cadangan aktif.
     isAdaptiveMode = (classNims.size() > 99);
     Serial.printf_P(PSTR("[PRESENSI_INJECT] Adaptive: %d mhs -> mode %s\n"),
         (int)classNims.size(), injectDual ? "DUAL (fp_1+fp_2)" : "SINGLE (fp_1 saja)");
 
-    // Step C2: SATU kali baca fingerprint_mahasiswa.csv, inject SEMUA mahasiswa kelas ini.
-    // PENTING: loop berjalan sampai file habis - JANGAN break/return setelah 1 mahasiswa.
-    int currentSlot = 3;  // Mulai dari slot 3 untuk mahasiswa (1-2 milik dosen)
+    // ========== STEP 2: Delta Check (Hitung Kebutuhan Slot) ==========
+    int requiredNewSlots = 0;
+
+    // Cek Dosen (butuh 2 slot)
+    int dosenExisting = 0;
+    for (int i = 1; i <= 200; i++) {
+        if (fingerMap[i] == dosenNip) dosenExisting++;
+    }
+    if (dosenExisting < 2) requiredNewSlots += (2 - dosenExisting);
+
+    // Cek Mahasiswa
+    int targetPerMhs = injectDual ? 2 : 1;
+    for (size_t i = 0; i < classNims.size(); i++) {
+        int mhsExisting = 0;
+        for (int j = 1; j <= 200; j++) {
+            if (fingerMap[j] == classNims[i]) mhsExisting++;
+        }
+        if (mhsExisting < targetPerMhs) requiredNewSlots += (targetPerMhs - mhsExisting);
+    }
+
+    int freeSlots = 0;
+    for (int i = 1; i <= 200; i++) {
+        if (fingerMap[i] == "") freeSlots++;
+    }
+
+    Serial.printf_P(PSTR("[PRESENSI_INJECT] Butuh slot baru: %d, Sisa slot kosong: %d\n"), requiredNewSlots, freeSlots);
+
+    bool needFlush = (requiredNewSlots > freeSlots);
+
+    // ========== STEP 3: FLUSH JIKA PERLU ==========
+    if (needFlush) {
+        Serial.println(F("[PRESENSI_INJECT] Slot tidak cukup. Memulai FLUSH SENSOR..."));
+        bool flushSuccess = false;
+        int flushRetry = 0;
+        const int MAX_FLUSH_RETRY = 3;
+
+        while (flushRetry < MAX_FLUSH_RETRY && !flushSuccess) {
+            uint8_t flushResult = finger->empty_library();
+            if (flushResult == FP_OK) {
+                Serial.println(F("[PRESENSI_INJECT] empty_library OK"));
+            } else {
+                Serial.printf_P(PSTR("[PRESENSI_INJECT] empty_library error: %d\n"), flushResult);
+            }
+
+            delay(50);
+            finger->count_templates();
+            int templateCount = finger->template_count;
+
+            if (templateCount == 0) {
+                flushSuccess = true;
+                Serial.println(F("[PRESENSI_INJECT] Flush validated: sensor KOSONG"));
+            } else {
+                flushRetry++;
+                Serial.printf_P(PSTR("[PRESENSI_INJECT] Flush retry %d/%d: template_count=%d\n"),
+                    flushRetry, MAX_FLUSH_RETRY, templateCount);
+
+                if (flushRetry < MAX_FLUSH_RETRY) {
+                    for (int d = 1; d <= 200; d++) finger->delete_model(d);
+                    delay(100);
+                }
+            }
+        }
+
+        if (!flushSuccess) {
+            Serial.println(F("[PRESENSI_INJECT] ERROR: Flush failed - ABORT!"));
+            return false;
+        }
+
+        // Bersihkan fingerMap
+        for (int i = 0; i <= 200; i++) fingerMap[i] = "";
+    } else {
+        Serial.println(F("[PRESENSI_INJECT] Sensor memadai. Melanjutkan mode SMART INJECT (tanpa flush)."));
+    }
+
+    // Fungsi pencari slot kosong
+    auto findEmptySlot = [&]() -> int {
+        for (int i = 1; i <= 200; i++) {
+            if (fingerMap[i] == "") return i;
+        }
+        return -1;
+    };
+
+    // ========== STEP 4: INJECT DOSEN ==========
+    Serial.println(F("[PRESENSI_INJECT] ======================================="));
+    Serial.printf_P(PSTR("[PRESENSI_INJECT] STEP 4: INJECT DOSEN LOGIN %s...\n"), dosenNip.c_str());
+
+    int dosenInjected = 0;
+    // Cek existing dosen
+    int currentDosenSlots = 0;
+    for (int i = 1; i <= 200; i++) {
+        if (fingerMap[i] == dosenNip) currentDosenSlots++;
+    }
+
+    if (currentDosenSlots < 2) {
+        File f = SD.open("/fingerprint_users.csv", FILE_READ);
+        if (f) {
+            if (f.available()) f.readStringUntil('\n'); // Skip header
+            while (f.available() && currentDosenSlots < 2) {
+                String line = f.readStringUntil('\n');
+                line.trim();
+                if (line.length() < 10) continue;
+                if (line.startsWith(F("id,")) || line.startsWith(F("id,user"))) continue;
+
+                int p1 = line.indexOf(',');
+                int p2 = line.indexOf(',', p1 + 1);
+                int p3 = line.indexOf(',', p2 + 1);
+                int p4 = line.indexOf(',', p3 + 1);
+                if (p1 <= 0 || p2 <= 0 || p3 <= 0 || p4 <= 0) continue;
+
+                String userId = line.substring(p1 + 1, p2);
+                String hexData = line.substring(p3 + 1, p4);
+                userId.trim(); hexData.trim();
+
+                if (userId != dosenNip) continue;
+                if (hexData.length() < 1000) continue;
+
+                int slot = findEmptySlot();
+                if (slot > 0) {
+                    if (injectSingleFingerprint(userId, hexData, slot)) {
+                        dosenInjected++;
+                        fingerMap[slot] = userId;
+                        currentDosenSlots++;
+                        Serial.printf_P(PSTR("[PRESENSI_INJECT] Injected Dosen: %s ke slot %d\n"), userId.c_str(), slot);
+                    }
+                }
+            }
+            f.close();
+        }
+    } else {
+        Serial.printf_P(PSTR("[PRESENSI_INJECT] Dosen %s sudah ada di sensor (Skipped).\n"), dosenNip.c_str());
+    }
+
+    // ========== STEP 5: INJECT MAHASISWA ==========
+    Serial.println(F("[PRESENSI_INJECT] ======================================="));
+    Serial.println(F("[PRESENSI_INJECT] STEP 5: INJECT MAHASISWA KELAS TERPILIH..."));
+
+    int mhsInjected = 0;
+    int mhsSkipped = 0;
+
     File fpFile = SD.open("/fingerprint_mahasiswa.csv", FILE_READ);
     if (fpFile) {
         if (fpFile.available()) fpFile.readStringUntil('\n'); // Skip header
 
-        while (fpFile.available() && currentSlot <= 200) {
+        while (fpFile.available()) {
             String line = fpFile.readStringUntil('\n');
             line.trim();
             if (line.length() < 10) continue;
             if (line.startsWith("id,") || line.startsWith("id,user")) continue;
 
-            // Format: id,user_id,role,data_jari,created_at
             int p1 = line.indexOf(',');
             int p2 = line.indexOf(',', p1 + 1);
             int p3 = line.indexOf(',', p2 + 1);
@@ -1214,57 +1181,61 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
             String csvNim = line.substring(p1 + 1, p2);
             csvNim.trim(); csvNim.replace("\r", "");
 
-            // Apakah NIM ini termasuk mahasiswa kelas terpilih?
             bool inClass = false;
             for (size_t i = 0; i < classNims.size(); i++) {
-                if (classNims[i] == csvNim) { inClass = true; break; }  // break hanya untuk pencarian kecil ini
+                if (classNims[i] == csvNim) { inClass = true; break; }
             }
-            if (!inClass) continue;  // bukan kelas ini -> lanjut, JANGAN berhenti
+            if (!inClass) continue;
 
-            String hexData = line.substring(p3 + 1, p4);  // fp_1 dari fingerprint_mahasiswa.csv
-            hexData.trim();
-
-            // ----- Inject fp_1 ke currentSlot (abaikan id/slot dari CSV) -----
-            if (hexData.length() >= 1000) {
-                if (injectSingleFingerprint(csvNim, hexData, currentSlot)) {
-                    mhsInjected++;
-                    fingerMap[currentSlot] = csvNim;  // Update fingerMap: slot -> NIM
-                    Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_1 mhs: %s ke slot %d\n"), csvNim.c_str(), currentSlot);
-                    currentSlot++;  // Naik HANYA jika sukses
-                } else {
-                    Serial.printf_P(PSTR("[PRESENSI_INJECT] Gagal inject fp_1: %s\n"), csvNim.c_str());
-                    continue;  // gagal fp_1 -> skip fp_2 utk NIM ini
-                }
-            } else {
-                continue;  // hex fp_1 tidak valid
+            // Cek sudah berapa kali NIM ini ada di fingerMap
+            int existingCount = 0;
+            for (int i = 1; i <= 200; i++) {
+                if (fingerMap[i] == csvNim) existingCount++;
             }
 
-            // ----- Inject fp_2 HANYA bila mode DUAL & slot masih ada -----
-            if (injectDual && currentSlot <= 200) {
-                String fp2Hex = readFp2Sidecar(csvNim);   // ambil dari /fp2_mahasiswa.csv
-                if (fp2Hex.length() >= 1000) {
-                    if (injectSingleFingerprint(csvNim, fp2Hex, currentSlot)) {
+            if (existingCount >= targetPerMhs) {
+                mhsSkipped++;
+                continue; // Sudah komplit
+            }
+
+            // Butuh inject fp_1?
+            if (existingCount == 0) {
+                String hexData = line.substring(p3 + 1, p4);
+                hexData.trim();
+                if (hexData.length() >= 1000) {
+                    int slot = findEmptySlot();
+                    if (slot > 0 && injectSingleFingerprint(csvNim, hexData, slot)) {
                         mhsInjected++;
-                        fingerMap[currentSlot] = csvNim;  // slot fp_2 -> NIM yang sama
-                        Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_2 mhs: %s ke slot %d\n"), csvNim.c_str(), currentSlot);
-                        currentSlot++;
+                        fingerMap[slot] = csvNim;
+                        existingCount++;
+                        Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_1 mhs: %s ke slot %d\n"), csvNim.c_str(), slot);
                     }
                 }
-                fp2Hex = "";  // bebaskan heap
             }
-            // TIDAK ada break -> teruskan sampai seluruh mahasiswa terinjeksi
+
+            // Butuh inject fp_2?
+            if (injectDual && existingCount < 2) {
+                String fp2Hex = readFp2Sidecar(csvNim);
+                if (fp2Hex.length() >= 1000) {
+                    int slot = findEmptySlot();
+                    if (slot > 0 && injectSingleFingerprint(csvNim, fp2Hex, slot)) {
+                        mhsInjected++;
+                        fingerMap[slot] = csvNim;
+                        existingCount++;
+                        Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_2 mhs: %s ke slot %d\n"), csvNim.c_str(), slot);
+                    }
+                }
+            }
         }
         fpFile.close();
-    } else {
-        Serial.println(F("[PRESENSI_INJECT] ERROR: fingerprint_mahasiswa.csv tidak ditemukan"));
     }
 
-    Serial.printf_P(PSTR("[PRESENSI_INJECT] Mahasiswa injected: %d\n"), mhsInjected);
+    Serial.printf_P(PSTR("[PRESENSI_INJECT] Mahasiswa injected: %d (Skipped: %d)\n"), mhsInjected, mhsSkipped);
 
     // ========== FINAL VERIFICATION ==========
     finger->count_templates();
     int totalSensor = finger->template_count;
-    Serial.printf_P(PSTR("[PRESENSI_INJECT] ===== DONE: %d Dosen, %d Mhs, %d total =====\n"),
+    Serial.printf_P(PSTR("[PRESENSI_INJECT] ===== DONE: %d new Dosen, %d new Mhs, %d total in sensor =====\n"),
         dosenInjected, mhsInjected, totalSensor);
     Serial.println(F("=========================================="));
 
