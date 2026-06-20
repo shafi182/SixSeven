@@ -112,6 +112,7 @@ public:
     // -------- High-level commands (match Python signatures) --------
     uint8_t verify_password();
     uint8_t read_sysparam();
+    uint8_t set_sysparam(uint8_t param_num, uint8_t param_val);
     uint8_t get_image();
     uint8_t image_2_tz(uint8_t slot = 1);
     uint8_t create_model();

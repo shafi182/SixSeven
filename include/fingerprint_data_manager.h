@@ -106,6 +106,9 @@ public:
     // Get timestamp for CSV - returns NTP time or "API_DISCONNECTED"
     String getTimestamp();
 
+    // Get local timestamp for a specific user ID
+    String getLocalFpTimestamp(String userId, String role = "mahasiswa");
+
     // ========== PUBLIC: SYNC POINTER FOR STATE MACHINE ==========
     // Pointer to syncFromCSV function in FingerprintManager
     void (*syncCallback)();

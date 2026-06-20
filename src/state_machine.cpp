@@ -254,6 +254,146 @@ int presensiJadwalId = 0;  // Non-static agar bisa diakses dari api_manager.cpp
 static String listHadir[120];  // Max 120 students per session
 static String listHadirTime[120];
 static int listHadirCount = 0;
+
+// Flag untuk trigger fetch token setelah WiFi terhubung saat resume
+static bool needResumeTokenFetch = false;
+
+// ========== AUTO-SAVE SESI (RESUME setelah alat mati mendadak) ==========
+// Checkpoint sesi disimpan di /session.csv; kehadiran real-time di /session_scans.csv.
+// Saat boot, init() membaca checkpoint -> kalau ACTIVE, lanjut tanpa login.
+struct SessionCkpt {
+    String mode, nip, pin, role, kodeMk, kelas, kelasId, status;
+    bool valid = false;
+};
+
+static SessionCkpt readSessionCheckpoint() {
+    SessionCkpt s;
+    File f = SD.open("/session.csv", FILE_READ);
+    if (!f) return s;
+    if (f.available()) f.readStringUntil('\n');   // skip header
+    if (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim(); line.replace("\r", "");
+        if (line.length() >= 5) {
+            String c[8]; int idx = 0, start = 0;
+            for (int i = 0; i <= (int)line.length() && idx < 8; i++) {
+                if (i == (int)line.length() || line.charAt(i) == ',') {
+                    c[idx++] = line.substring(start, i); start = i + 1;
+                }
+            }
+            s.mode = c[0]; s.nip = c[1]; s.pin = c[2]; s.role = c[3];
+            s.kodeMk = c[4]; s.kelas = c[5]; s.kelasId = c[6]; s.status = c[7];
+            s.mode.trim(); s.status.trim();
+            s.valid = (s.mode.length() > 0);
+        }
+    }
+    f.close();
+    return s;
+}
+
+static void writeSessionCheckpoint(const char* mode, const String& nip, const String& pin,
+                                   const String& role, const String& kodeMk,
+                                   const String& kelas, const String& kelasId) {
+    SD.remove("/session.csv");
+    File f = SD.open("/session.csv", FILE_WRITE);
+    if (!f) { Serial.println(F("[SESSION] gagal tulis session.csv")); return; }
+    f.println("mode,nip,pin,role,kode_mk,kelas,kelas_id,status");
+    f.printf("%s,%s,%s,%s,%s,%s,%s,ACTIVE\n",
+        mode, nip.c_str(), pin.c_str(), role.c_str(),
+        kodeMk.c_str(), kelas.c_str(), kelasId.c_str());
+    f.close();
+    Serial.printf_P(PSTR("[SESSION] checkpoint: %s %s-%s\n"), mode, kodeMk.c_str(), kelas.c_str());
+}
+
+static void clearSessionScans() { SD.remove("/session_scans.csv"); }
+
+static void clearSessionCheckpoint() {
+    SD.remove("/session.csv");
+    SD.remove("/session_scans.csv");
+    SD.remove("/session_fingermap.csv");
+}
+
+static void appendSessionScan(const String& nim, const String& ts) {
+    File f = SD.open("/session_scans.csv", FILE_APPEND);
+    if (!f) return;
+    if (f.size() == 0) f.println("nim,timestamp");
+    f.printf("%s,%s\n", nim.c_str(), ts.c_str());
+    f.flush();   // paksa commit ke SD agar tahan mati listrik mendadak
+    f.close();
+}
+
+// ========== SNAPSHOT fingerMap (slot -> NIM/NIP) ==========
+// fingerMap berada di RAM (hilang saat mati). Template di flash R503 PERSISTEN,
+// jadi saat resume kita TIDAK inject ulang - cukup pulihkan fingerMap dari snapshot
+// ini agar pemetaan slot->identitas sama persis seperti sebelum mati.
+extern String fingerMap[201];
+
+static void saveFingerMapSnapshot() {
+    SD.remove("/session_fingermap.csv");
+    File f = SD.open("/session_fingermap.csv", FILE_WRITE);
+    if (!f) { Serial.println(F("[SESSION] gagal tulis fingermap snapshot")); return; }
+    f.println("slot,user_id");
+    for (int i = 1; i <= 200; i++) {
+        if (fingerMap[i].length() > 0) f.printf("%d,%s\n", i, fingerMap[i].c_str());
+    }
+    f.flush();
+    f.close();
+    Serial.println(F("[SESSION] fingerMap snapshot disimpan"));
+}
+
+static int loadFingerMapSnapshot() {
+    File f = SD.open("/session_fingermap.csv", FILE_READ);
+    if (!f) return 0;
+    for (int i = 0; i <= 200; i++) fingerMap[i] = "";
+    if (f.available()) f.readStringUntil('\n');   // skip header
+    int n = 0;
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim(); line.replace("\r", "");
+        if (line.length() < 3) continue;
+        int p1 = line.indexOf(',');
+        if (p1 <= 0) continue;
+        int slot = line.substring(0, p1).toInt();
+        String id = line.substring(p1 + 1); id.trim();
+        if (slot >= 1 && slot <= 200 && id.length() > 0) { fingerMap[slot] = id; n++; }
+    }
+    f.close();
+    Serial.printf_P(PSTR("[SESSION] fingerMap snapshot dimuat: %d slot\n"), n);
+    return n;
+}
+
+// Dipakai main.cpp utk memutuskan apakah boot harus melewati flush/inject sensor.
+bool hasActivePresensiResume() {
+    SessionCkpt s = readSessionCheckpoint();
+    return (s.valid && s.status == "ACTIVE" && s.mode == "PRESENSI");
+}
+
+// Muat ulang kehadiran tersimpan ke listHadir[]/listHadirTime[]. Return jumlah.
+static int loadSessionScans() {
+    File f = SD.open("/session_scans.csv", FILE_READ);
+    if (!f) return listHadirCount;
+    if (f.available()) f.readStringUntil('\n');   // skip header
+    while (f.available() && listHadirCount < 120) {
+        String line = f.readStringUntil('\n');
+        line.trim(); line.replace("\r", "");
+        if (line.length() < 3) continue;
+        int p1 = line.indexOf(',');
+        if (p1 <= 0) continue;
+        String nim = line.substring(0, p1);
+        String ts  = line.substring(p1 + 1);
+        nim.trim(); ts.trim();
+        if (nim.length() == 0) continue;
+        bool dup = false;
+        for (int i = 0; i < listHadirCount; i++) if (listHadir[i] == nim) { dup = true; break; }
+        if (dup) continue;
+        listHadir[listHadirCount] = nim;
+        listHadirTime[listHadirCount] = ts;
+        listHadirCount++;
+    }
+    f.close();
+    return listHadirCount;
+}
+
 static int currentFPMatchSlot = 0;  // Slot ID fingerprint yang cocok
 static bool isRetryPull = false;    // Menyimpan state apakah sedang retry pull FP
 // ========== TUGAS 4: PULL FINGERPRINT STATUS ==========
@@ -309,6 +449,27 @@ StateMachine::StateMachine(LCDManager* l, KeypadManager* k, InputHandler* i, Aut
 
 // ================= LOGIN RESET =================
 void StateMachine::goToLogin() {
+    // Kembali ke login = sesi selesai/logout -> buang checkpoint auto-save.
+    // (Tidak dipanggil di jalur resume, jadi sesi yang sedang dilanjut tetap aman.)
+    clearSessionCheckpoint();
+
+    // ========== RE-INJECT FINGERPRINT USERS (DOSEN/ADMIN) ==========
+    // Karena saat sesi presensi/registrasi selesai, sensor berisi jari mahasiswa
+    // Kita perlu flush sensor dan injeksi ulang jari Dosen/Admin agar bisa login
+    
+    // Flag global internal untuk mencegah double-sync saat boot (dideklarasi di bawah init)
+    extern bool g_skipLoginSync; 
+    
+    if (!g_skipLoginSync) {
+        lcd->clear();
+        lcd->printLine(0, F("Menyiapkan Alat..."));
+        lcd->printLine(1, F("Mohon Tunggu"));
+        delay(100);
+        Serial.println("[LOGIN] Re-injecting user fingerprints for login...");
+        fingerprintManager.syncFromCSV(&userManager);
+    }
+    g_skipLoginSync = false; // Reset flag agar panggilan berikutnya selalu sync
+
     currentState = STATE_LOGIN;
     mode = INPUT_NIP;
 
@@ -332,8 +493,82 @@ void StateMachine::goToMainMenu() {
     needRender = true;
 }
 
+bool g_skipLoginSync = false;
+
 // ================= INIT =================
 void StateMachine::init() {
+    // ========== AUTO-SAVE RESUME ==========
+    // Cek checkpoint sesi di SD. Bila ada sesi ACTIVE (alat mati saat presensi/registrasi),
+    // langsung lanjut TANPA login. Re-inject sensor dari SD (offline OK).
+    SessionCkpt s = readSessionCheckpoint();
+    if (s.valid && s.status == "ACTIVE") {
+        tempNIP = s.nip;
+        sessionPin = s.pin;
+        s.role.toLowerCase();
+        currentRole = (s.role == "admin") ? ROLE_ADMIN : ROLE_DOSEN;
+
+        // ========== BACA TOKEN DARI SD CARD UNTUK RESUME ==========
+        File tokenFile = SD.open("/token.txt", FILE_READ);
+        if (tokenFile) {
+            globalJwtToken = tokenFile.readString();
+            globalJwtToken.trim();
+            tokenFile.close();
+            Serial.println("[RESUME] JWT Token dimuat dari SD Card.");
+        } else {
+            Serial.println("[RESUME] WARNING: /token.txt tidak ditemukan. Token mungkin kosong.");
+        }
+        
+        if (globalJwtToken.length() == 0) {
+            needResumeTokenFetch = true;
+            Serial.println("[RESUME] Token kosong. Dijadwalkan fetch API setelah WiFi terhubung.");
+        }
+
+        if (s.mode == "PRESENSI") {
+            presensiKodeMk  = s.kodeMk;
+            presensiKelas   = s.kelas;
+            presensiKelasId = s.kelasId;
+
+            // Muat kembali kehadiran yang sudah terkumpul (real-time scans)
+            listHadirCount = 0;
+            for (int i = 0; i < 120; i++) { listHadir[i] = ""; listHadirTime[i] = ""; }
+            int n = loadSessionScans();
+            Serial.printf_P(PSTR("[RESUME] Presensi %s-%s, %d hadir dimuat\n"),
+                presensiKodeMk.c_str(), presensiKelas.c_str(), n);
+
+            // TIDAK inject ulang: template di flash R503 PERSISTEN saat mati listrik.
+            // Cukup pulihkan fingerMap dari snapshot (boot sudah dilewati flush/inject
+            // di main.cpp, jadi data sensor tetap utuh).
+            loadFingerMapSnapshot();
+
+            lcd->clear();
+            lcd->printLine(0, F("LANJUT PRESENSI"));
+            lcd->printLine(1, presensiKodeMk + "-" + presensiKelas);
+            lcd->printLine(2, "Hadir: " + String(n));
+            delay(1500);
+            logSystemActivity("RESUME", "Lanjut presensi " + presensiKodeMk + "-" + presensiKelas +
+                " (" + String(n) + " hadir)");
+
+            currentState = STATE_PRESENSI_SCANNING;
+            needRender = true;
+            return;
+        }
+
+        if (s.mode == "REGISTRASI") {
+            tempKodeMk = s.kodeMk;
+            tempKelas  = s.kelas;
+            lcd->clear();
+            lcd->printLine(0, F("LANJUT REGISTRASI"));
+            lcd->printLine(1, tempKodeMk + "-" + tempKelas);
+            delay(1500);
+            logSystemActivity("RESUME", "Lanjut registrasi " + tempKodeMk + "-" + tempKelas);
+
+            currentState = STATE_REG_MHS_INPUT_NIM;
+            needRender = true;
+            return;
+        }
+    }
+
+    g_skipLoginSync = true;
     goToLogin();
 }
 
@@ -429,6 +664,16 @@ void StateMachine::update() {
     // Publikasikan state aktif agar getCurrentSyncStatus() (yang dipanggil
     // dari input_handler, lcd, dll) tahu konteks halaman saat ini.
     g_currentState = (int)currentState;
+
+    // ========== FETCH TOKEN UNTUK RESUME SESI ==========
+    if (needResumeTokenFetch && WiFi.status() == WL_CONNECTED) {
+        needResumeTokenFetch = false;
+        Serial.println("[RESUME] Mengambil token baru via API (Background)...");
+        // Panggil login API tanpa dashboard fetch agar cepat
+        apiManager.sendLoginAcknowledge(tempNIP, sessionPin, false);
+        // Paksa render ulang UI agar kembali ke tampilan mode presensi/registrasi saat ini
+        needRender = true;
+    }
 
     switch (currentState) {
 
@@ -2360,6 +2605,12 @@ void StateMachine::update() {
 
             if (needRender) {
                 nimBuffer = "";
+                // ========== AUTO-SAVE: tandai sesi registrasi AKTIF ==========
+                // Ditulis tiap masuk layar input NIM (idempoten) agar checkpoint selalu
+                // mencerminkan kelas yang sedang didaftarkan. Resume -> kembali ke sini.
+                writeSessionCheckpoint("REGISTRASI", tempNIP, sessionPin,
+                    (currentRole == ROLE_ADMIN ? "admin" : "dosen"),
+                    tempKodeMk, tempKelas, "");
                 lcd->clear();
                 // ========== TUGAS 1: TAMPILKAN RASIO DI LCD ==========
                 lcd->printLine(0, "NIM Mahasiswa:");
@@ -2860,6 +3111,9 @@ void StateMachine::update() {
                     // lcd->printLine(1, "Siap di-push");
                     delay(2000);
 
+                    // AUTO-SAVE: sesi registrasi selesai -> buang checkpoint
+                    clearSessionCheckpoint();
+
                     // Reset variabel sesi
                     tempKodeMk = "";
                     tempKelas = "";
@@ -2978,6 +3232,9 @@ void StateMachine::update() {
                     lcd->printLine(0, "Registrasi Selesai!");
                     // lcd->printLine(1, "Siap di-push");
                     delay(2000);
+
+                    // AUTO-SAVE: sesi registrasi selesai -> buang checkpoint
+                    clearSessionCheckpoint();
 
                     // Reset variabel sesi
                     tempKodeMk = "";
@@ -5050,51 +5307,110 @@ void StateMachine::update() {
 
                 //Baca kelas_mahasiswa.csv dan kumpulkan NIM dengan status_fingerprint=true
                 File kmFile = SD.open("/kelas_mahasiswa.csv", FILE_READ);
+                
+                struct PullCandidate { String nim; String serverFpUpdated; };
+                std::vector<PullCandidate> candidates;
+
                 if (kmFile) {
                     if (kmFile.available()) kmFile.readStringUntil('\n'); // Skip header
 
-                    while (kmFile.available() && targetCount < 200) {
+                    while (kmFile.available() && candidates.size() < 200) {
                         String line = kmFile.readStringUntil('\n');
                         line.trim();
                         if (line.length() < 5) continue;
                         if (line.startsWith("id,") || line.startsWith("id,kode")) continue;
 
-                        // Asumsi header: id,kode_kelas,kelas,nim,sit_in,status_fingerprint
+                        // Asumsi header: id,kode_kelas,kelas,nim,sit_in,status_fingerprint,fp_updated_at
                         String csvKode = apiManager.getCsvColumn(line, 1);
                         String csvKelas = apiManager.getCsvColumn(line, 2);
                         String csvNim = apiManager.getCsvColumn(line, 3);
                         String csvStatusFp = apiManager.getCsvColumn(line, 5);
+                        String csvFpUpdated = apiManager.getCsvColumn(line, 6);
 
                         csvKode.trim(); csvKode.replace("\r", "");
                         csvKelas.trim(); csvKelas.replace("\r", "");
                         csvNim.trim(); csvNim.replace("\r", "");
                         csvStatusFp.trim(); csvStatusFp.replace("\r", "");
+                        csvFpUpdated.trim(); csvFpUpdated.replace("\r", "");
 
                         if (csvKode == presensiKodeMk && csvKelas == presensiKelas && csvStatusFp == "true") {
-                            // OVERWRITE MODE: masukkan SEMUA NIM valid tanpa cek lokal
                             // KECUALI jika ini adalah retry (isRetryPull = true), maka lewati yang sudah ada di lokal
                             if (isRetryPull) {
                                 if (fingerprintDataManager.hasFingerprint(csvNim)) continue;
                             }
                             
-                            targetNims[targetCount] = csvNim;
-                            Serial.printf("[PULL_FP] Ditemukan NIM: %s (status_fp=%s)\n", csvNim.c_str(), csvStatusFp.c_str());
-                            targetCount++;
+                            PullCandidate pc;
+                            pc.nim = csvNim;
+                            pc.serverFpUpdated = csvFpUpdated;
+                            candidates.push_back(pc);
                         }
                     }
                     kmFile.close();
                 }
 
+                // ========== PRE-CHECK TIMESTAMP LOKAL SECARA MASSAL (1 PASS SCAN) ==========
+                // Mencegah O(N*M) file scanning yang sangat lambat.
+                if (candidates.size() > 0 && !isRetryPull) {
+                    File fpFile = SD.open("/fingerprint_mahasiswa.csv", FILE_READ);
+                    if (fpFile) {
+                        while (fpFile.available()) {
+                            String line = fpFile.readStringUntil('\n');
+                            line.trim();
+                            if (line.length() < 5 || line.startsWith("id,")) continue;
+
+                            int p1 = line.indexOf(',');
+                            int p2 = line.indexOf(',', p1 + 1);
+                            if (p1 <= 0 || p2 <= 0) continue;
+
+                            String csvUserId = line.substring(p1 + 1, p2);
+                            csvUserId.trim();
+                            csvUserId.replace("\r", "");
+
+                            // Cek apakah NIM ini ada di kandidat pull kita
+                            for (size_t i = 0; i < candidates.size(); i++) {
+                                if (candidates[i].nim == csvUserId && candidates[i].serverFpUpdated.length() > 0 && candidates[i].serverFpUpdated != "API_DISCONNECTED") {
+                                    int colRoleEnd = line.indexOf(',', p2 + 1);
+                                    int colHexEnd = (colRoleEnd > 0) ? line.indexOf(',', colRoleEnd + 1) : -1;
+                                    if (colRoleEnd > 0 && colHexEnd > 0) {
+                                        String localFpUpdated = line.substring(colHexEnd + 1);
+                                        localFpUpdated.trim();
+                                        localFpUpdated.replace("\r", "");
+
+                                        if (localFpUpdated.length() > 0 && candidates[i].serverFpUpdated <= localFpUpdated) {
+                                            Serial.printf("[PULL_FP] Skip NIM: %s, data lokal up-to-date\n", csvUserId.c_str());
+                                            candidates[i].nim = ""; // Tandai sebagai di-skip
+                                        }
+                                    }
+                                    break; // Lanjut ke baris fpFile berikutnya
+                                }
+                            }
+                        }
+                        fpFile.close();
+                    }
+                }
+
+                // ========== MASUKKAN SISANYA KE ANTRIAN PULL ==========
+                for (size_t i = 0; i < candidates.size(); i++) {
+                    if (candidates[i].nim.length() > 0) {
+                        targetNims[targetCount] = candidates[i].nim;
+                        Serial.printf("[PULL_FP] Masuk antrian NIM: %s\n", candidates[i].nim.c_str());
+                        targetCount++;
+                    }
+                }
+
                 Serial.printf("[PULL_FP] Ditemukan %d mhs dengan status_fingerprint=true\n", targetCount);
 
                 lcd->clear();
-                lcd->printLine(0, "Pull FP: " + String(targetCount));
+                lcd->printLine(0, "SINKRONISASI");
+                lcd->printLine(1, "Up-to-date: " + String(candidates.size() - targetCount));
+                lcd->printLine(2, "Tarik FP: " + String(targetCount));
+                
+                delay(1500); // Tahan agar dosen bisa membaca
 
                 if (targetCount == 0) {
-                    // Tidak ada mahasiswa dengan fingerprint
-                    lcd->printLine(1, "Tidak ada FP");
-                    lcd->printLine(2, "Lewati pull...");
-                    Serial.println("[PULL_FP] Tidak ada mahasiswa dengan fingerprint, langsung mulai presensi (Auto-Match Jadwal)");
+                    // Semua up-to-date atau tidak ada mahasiswa ber-FP sama sekali
+                    lcd->printLine(3, "Selesai, lanjut...");
+                    Serial.println("[PULL_FP] Tidak ada mahasiswa yang perlu ditarik, langsung mulai presensi (Auto-Match Jadwal)");
                     delay(1500);
                     // AUTO-MATCH JADWAL: lewati pemilihan pertemuan -> langsung siapkan sensor
                     currentState = STATE_PRESENSI_INJECT_SENSOR;
@@ -5131,7 +5447,7 @@ void StateMachine::update() {
                 }
 
                 Serial.printf("[BATCH_PULL] Request #%d: %s\n", pullIndex + 1, nimList.c_str());
-                lcd->printLine(1, "NIM: " + nimList);
+                // lcd->printLine(1, "NIM: " + nimList);
 
                 // Step 2: Panggil API untuk batch ini
                 // PENTING: batchDoc HARUS hidup selama seluruh loop pemrosesan di bawah,
@@ -5599,6 +5915,19 @@ void StateMachine::update() {
                 delay(1000);
             }
 
+            // ========== AUTO-SAVE: tandai sesi presensi AKTIF ==========
+            // Reset daftar scan, pra-buat file scan (agar entry direktori ter-commit lebih
+            // awal), tulis checkpoint, lalu SNAPSHOT fingerMap (slot->NIM/NIP hasil inject
+            // barusan). Saat resume, template R503 dipertahankan -> cukup load snapshot ini,
+            // tanpa inject ulang.
+            clearSessionScans();
+            { File sf = SD.open("/session_scans.csv", FILE_WRITE);
+              if (sf) { sf.println("nim,timestamp"); sf.flush(); sf.close(); } }
+            writeSessionCheckpoint("PRESENSI", tempNIP, sessionPin,
+                (currentRole == ROLE_ADMIN ? "admin" : "dosen"),
+                presensiKodeMk, presensiKelas, presensiKelasId);
+            saveFingerMapSnapshot();
+
             // Lanjut ke otorisasi dosen awal (sensor sudah siap)
             currentState = STATE_PRESENSI_AUTH_START;
             needRender = true;
@@ -5811,6 +6140,8 @@ void StateMachine::update() {
                             // Add to listHadir
                             listHadir[listHadirCount] = matchedNIM;
                             listHadirTime[listHadirCount] = fingerprintDataManager.getTimestamp();
+                            // AUTO-SAVE: catat scan ke SD seketika agar tahan mati listrik
+                            appendSessionScan(matchedNIM, listHadirTime[listHadirCount]);
                             listHadirCount++;
 
                             // LED feedback - BLUE/GREEN flash
@@ -6004,6 +6335,8 @@ void StateMachine::update() {
 
                             if (!already && listHadirCount < 120) {
                                 listHadirTime[listHadirCount] = fingerprintDataManager.getTimestamp();
+                                // AUTO-SAVE: catat scan cadangan ke SD seketika
+                                appendSessionScan(nimBuffer, listHadirTime[listHadirCount]);
                                 listHadir[listHadirCount++] = nimBuffer;
                                 logSystemActivity("PRESENSI_CADANGAN", "Hadir (fp_2) slot " + String(cadSlot) + ": " + nimBuffer);
                             }
@@ -6297,6 +6630,9 @@ void StateMachine::update() {
                 // 1. Push berhasil (showingSuccess=true), ATAU
                 // 2. Dosen memilih menyerah dengan menekan D (inRetryLoop=false ATAU pushCompleted tapi tidak success)
                 Serial.println("[PRESENSI_SAVE] Menutup sesi presensi");
+
+                // AUTO-SAVE: sesi presensi selesai -> buang checkpoint + scans
+                clearSessionCheckpoint();
 
                 presensiKodeMk = "";
                 presensiKelas = "";

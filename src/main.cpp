@@ -109,16 +109,26 @@ void setup() {
     // Init fingerprint manager
     fingerprintManager.init();
 
+    // ========== AUTO-SAVE RESUME: deteksi sesi presensi yang terputus ==========
+    // Bila ada sesi PRESENSI ACTIVE, template di flash R503 MASIH UTUH (persisten saat
+    // mati listrik). Maka boot TIDAK boleh flush+inject sensor - cukup pulihkan fingerMap
+    // dari snapshot (dilakukan nanti di sm.init()). Ini menghapus inject ganda saat resume.
+    bool resumePresensi = hasActivePresensiResume();
+    if (resumePresensi) {
+        Serial.println(F("[BOOT] Resume presensi terdeteksi -> LEWATI flush/inject sensor (data R503 dipertahankan)"));
+    }
+
     // ========== LOCAL-FIRST FINGERPRINT SYNC (WAJIB - SEBELUM WiFi) ==========
     // Flush dan inject fingerprint_users.csv agar login offline berfungsi
     // Ini wajib dijalankan tanpa mempedulikan status WiFi/API
-    Serial.println(F("[BOOT] Menjalankan local-first fingerprint sync..."));
-
-    bool bootSync = fingerprintManager.syncFromCSV(&userManager);
-    if (bootSync) {
-        Serial.println(F("[BOOT] Local-first sync BERHASIL"));
-    } else {
-        Serial.println(F("[BOOT] Local-first sync GAGAL"));
+    if (!resumePresensi) {
+        Serial.println(F("[BOOT] Menjalankan local-first fingerprint sync..."));
+        bool bootSync = fingerprintManager.syncFromCSV(&userManager);
+        if (bootSync) {
+            Serial.println(F("[BOOT] Local-first sync BERHASIL"));
+        } else {
+            Serial.println(F("[BOOT] Local-first sync GAGAL"));
+        }
     }
 
     // ========== NETWORK & API LOGIN (DENGAN BYPASS) ==========
@@ -158,7 +168,11 @@ void setup() {
     // --- Login ke API (/api/device/login) ---
     // Ambil token JWT (finger_id tidak dipakai di server, beri 0 sebagai placeholder)
     String token = apiManager.apiLogin(0);
-    if (token.length() > 0) {
+    if (resumePresensi) {
+        // Resume: jangan sentuh sensor (flush+inject akan menghapus data presensi yang
+        // sedang berjalan). fingerMap dipulihkan via snapshot di sm.init().
+        Serial.println(F("[BOOT] Resume presensi -> lewati master-sync inject sensor"));
+    } else if (token.length() > 0) {
         // ========== STEP 1: FLUSH & VALIDATION (WAJIB) ==========
         // CSV adalah Source of Truth - flush sensor dulu, baru inject
         Serial.println(F("[SYNC] ===== MASTER SYNC START ====="));
@@ -357,12 +371,20 @@ void loop() {
     static bool apiSyncInProgress = false;
     if (WiFi.status() == WL_CONNECTED && apiManager.isTimeSynced() && !apiSynced && !apiSyncInProgress) {
         apiSyncInProgress = true;
-        Serial.println("[SYSTEM] WiFi Connected + SNTP Synced! Memulai Sinkronisasi User...");
-        apiManager.syncUsersFromAPI();
-        apiSynced = true;
+        
+        // Skip sync jika sistem sedang dalam sesi aktif (resume session)
+        if (sm.getState() == STATE_LOGIN) {
+            Serial.println("[SYSTEM] WiFi Connected + SNTP Synced! Memulai Sinkronisasi User...");
+            apiManager.syncUsersFromAPI();
+            apiSynced = true;
 
-        Serial.println("[SYSTEM] Mengembalikan state ke Login...");
-        sm.init();  // Reset state machine ke STATE_LOGIN
+            // Refresh layar login
+            Serial.println("[SYSTEM] Refresh layar Login pasca-sync...");
+            sm.init();
+        } else {
+            Serial.println("[SYSTEM] WiFi Connected + SNTP Synced! Sesi aktif terdeteksi, lewati Sinkronisasi User.");
+            apiSynced = true;
+        }
     }
 
     if (WiFi.status() != WL_CONNECTED) {

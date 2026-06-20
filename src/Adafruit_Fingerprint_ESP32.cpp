@@ -281,6 +281,15 @@ uint8_t Adafruit_Fingerprint_ESP32::read_sysparam() {
     return FP_OK;
 }
 
+uint8_t Adafruit_Fingerprint_ESP32::set_sysparam(uint8_t param_num, uint8_t param_val) {
+    uint8_t cmd[3] = { 0x0E, param_num, param_val };
+    _send_packet(cmd, 3);
+    uint8_t reply[16]; size_t n = 0;
+    uint8_t st = _get_packet(12, reply, sizeof(reply), &n);
+    if (st != FP_OK) return st;
+    return n ? reply[0] : FP_PACKETRECEIVEERR;
+}
+
 uint8_t Adafruit_Fingerprint_ESP32::get_image() {
     uint8_t cmd[1] = { FP_GETIMAGE };
     _send_packet(cmd, 1);

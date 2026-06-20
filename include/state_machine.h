@@ -123,4 +123,13 @@ public:
 
     void init();
     void update();
+
+    // State aktif saat ini (dipakai main.cpp agar sm.init() pasca-sync tidak
+    // mereset sesi yang sedang berjalan / sesi yang baru di-resume).
+    State getState() const { return currentState; }
 };
+
+// Peek (sebelum sm dibuat resume) apakah ada sesi PRESENSI ACTIVE di SD.
+// Dipakai main.cpp untuk MELEWATI flush+inject sensor saat boot, agar template
+// di flash R503 (yang persisten) tidak terhapus dan tidak perlu di-inject ulang.
+bool hasActivePresensiResume();

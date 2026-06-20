@@ -129,11 +129,24 @@ void FingerprintManager::init() {
         // Read system parameters
         uint8_t p = finger->read_sysparam();
         if (p == FP_OK) {
+            // Cek dan ubah Data Package Size menjadi 256 byte jika belum (param 6, value 3)
+            if (finger->data_packet_size != 3) {
+                Serial.println("[INIT] Meningkatkan Data Package Size ke 256 byte...");
+                if (finger->set_sysparam(6, 3) == FP_OK) {
+                    Serial.println("[INIT] Data Package Size berhasil di-set ke 256 byte!");
+                    delay(50);
+                    finger->read_sysparam(); // Baca ulang agar nilai tersinkron
+                } else {
+                    Serial.println("[INIT] Gagal mengatur Data Package Size.");
+                }
+            }
+
             Serial.println("[INIT] ========== SENSOR PARAMETERS ==========");
             Serial.println("[INIT] Library Size: " + String(finger->library_size));
             Serial.println("[INIT] Security Level: " + String(finger->security_level));
             Serial.println("[INIT] Template Count: " + String(finger->template_count));
             Serial.println("[INIT] Baud Param (N): " + String(finger->baudrate_param) + " -> " + String((int)finger->baudrate_param * 9600) + " bps");
+            Serial.println("[INIT] Pkt Size Param: " + String(finger->data_packet_size) + " (3 = 256B)");
         }
     } else {
         Serial.println("[INIT] Fingerprint sensor NOT FOUND!");

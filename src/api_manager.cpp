@@ -1501,7 +1501,7 @@ bool APIManager::fetchDataMahasiswa(String kode_mk, int kelas) {
     Serial.printf_P(PSTR("[DPK] Ditemukan %d mahasiswa\n"), (int)mhsArray.size());
 
     // ---- Kumpulkan baris DPK ke memori (1 kelas, aman untuk RAM) ----
-    struct DpkRow { String nim; String nama; String sitIn; String statusFp; };
+    struct DpkRow { String nim; String nama; String sitIn; String statusFp; String fpUpdatedAt; };
     std::vector<DpkRow> rows;
     for (JsonObject m : mhsArray) {
         // nim bisa number ATAU string -> tangani keduanya
@@ -1526,10 +1526,16 @@ bool APIManager::fetchDataMahasiswa(String kode_mk, int kelas) {
         if (!m["status_fp"].isNull()) fp = m["status_fp"].as<bool>();
         String statusFp = fp ? "true" : "false";
 
-        DpkRow r; r.nim = nim; r.nama = nama; r.sitIn = sitIn; r.statusFp = statusFp;
+        // fp_updated_at -> timestamp update fingerprint
+        String fpUpdated = "";
+        if (m["fp_updated_at"].is<const char*>()) fpUpdated = m["fp_updated_at"].as<String>();
+        else if (m["updated_at"].is<const char*>()) fpUpdated = m["updated_at"].as<String>();
+        fpUpdated.trim(); fpUpdated.replace("\r", "");
+
+        DpkRow r; r.nim = nim; r.nama = nama; r.sitIn = sitIn; r.statusFp = statusFp; r.fpUpdatedAt = fpUpdated;
         rows.push_back(r);
-        Serial.printf_P(PSTR("[DPK]   nim=%s type=%s sit_in=%s status_fp=%s\n"),
-            nim.c_str(), type.c_str(), sitIn.c_str(), statusFp.c_str());
+        Serial.printf_P(PSTR("[DPK]   nim=%s type=%s sit_in=%s status_fp=%s fp_updated=%s\n"),
+            nim.c_str(), type.c_str(), sitIn.c_str(), statusFp.c_str(), fpUpdated.c_str());
     }
 
     if (rows.empty()) {
@@ -1592,7 +1598,7 @@ bool APIManager::fetchDataMahasiswa(String kode_mk, int kelas) {
         File oldKM = SD.open("/kelas_mahasiswa.csv", FILE_READ);
         File tempKM = SD.open("/temp_km.csv", FILE_WRITE);
         if (tempKM) {
-            tempKM.println("id,kode_kelas,kelas,nim,sit_in,status_fingerprint");
+            tempKM.println("id,kode_kelas,kelas,nim,sit_in,status_fingerprint,fp_updated_at");
             std::vector<bool> done(rows.size(), false);
             if (oldKM) {
                 if (oldKM.available()) oldKM.readStringUntil('\n');  // skip header
@@ -1614,8 +1620,8 @@ bool APIManager::fetchDataMahasiswa(String kode_mk, int kelas) {
                         for (size_t i = 0; i < rows.size(); i++) if (rows[i].nim == cNim) { idx = (int)i; break; }
                     }
                     if (idx >= 0) {
-                        tempKM.printf("%s,%s,%s,%s,%s,%s\n", cId.c_str(), kode_mk.c_str(), kelasStr.c_str(),
-                            cNim.c_str(), rows[idx].sitIn.c_str(), rows[idx].statusFp.c_str());
+                        tempKM.printf("%s,%s,%s,%s,%s,%s,%s\n", cId.c_str(), kode_mk.c_str(), kelasStr.c_str(),
+                            cNim.c_str(), rows[idx].sitIn.c_str(), rows[idx].statusFp.c_str(), rows[idx].fpUpdatedAt.c_str());
                         done[idx] = true;
                     } else {
                         tempKM.println(line);  // kelas lain / nim lain -> pertahankan
@@ -1625,8 +1631,8 @@ bool APIManager::fetchDataMahasiswa(String kode_mk, int kelas) {
             }
             for (size_t i = 0; i < rows.size(); i++) {
                 if (!done[i]) {
-                    tempKM.printf("%d,%s,%s,%s,%s,%s\n", nextId++, kode_mk.c_str(), kelasStr.c_str(),
-                        rows[i].nim.c_str(), rows[i].sitIn.c_str(), rows[i].statusFp.c_str());
+                    tempKM.printf("%d,%s,%s,%s,%s,%s,%s\n", nextId++, kode_mk.c_str(), kelasStr.c_str(),
+                        rows[i].nim.c_str(), rows[i].sitIn.c_str(), rows[i].statusFp.c_str(), rows[i].fpUpdatedAt.c_str());
                 }
             }
             tempKM.close();
@@ -1692,21 +1698,11 @@ void APIManager::calculateEnrollRatioCache() {
         // ========== DEBUG: Tampilkan baris mentah ==========
         Serial.printf_P(PSTR("[DEBUG-PARSE] Raw Line: %s\n"), line.c_str());
 
-        // ========== EKSTRAKSI ROBUST (dari belakang) ==========
-        // Format: id,kode_kelas,kelas,nim,sit_in,status_fingerprint
-        // Ambil dari belakang untuk status_fp (kolom terakhir)
-        int lastComma = line.lastIndexOf(',');
-        String statusFp = (lastComma > 0) ? line.substring(lastComma + 1) : "";
-
-        // Untuk kode_kelas dan kelas, tetap dari depan
-        int p1 = line.indexOf(',');
-        int p2 = line.indexOf(',', p1 + 1);
-        int p3 = line.indexOf(',', p2 + 1);
-
-        if (p1 <= 0 || p2 <= 0 || p3 <= 0) continue;
-
-        String kodeKelas = line.substring(p1 + 1, p2);
-        String kelas = line.substring(p2 + 1, p3);
+        // ========== EKSTRAKSI ROBUST ==========
+        // Format: id,kode_kelas,kelas,nim,sit_in,status_fingerprint,fp_updated_at
+        String kodeKelas = getCsvColumn(line, 1);
+        String kelas = getCsvColumn(line, 2);
+        String statusFp = getCsvColumn(line, 5);
 
         // ========== AGGRESSIVE TRIM (Hapus hidden characters) ==========
         kodeKelas.trim();
@@ -1723,8 +1719,8 @@ void APIManager::calculateEnrollRatioCache() {
         statusFp.replace(" ", "");
 
         // ========== DEBUG: Tampilkan setelah ekstraksi ==========
-        Serial.printf_P(PSTR("[DEBUG-PARSE] Kode: %s | Kls: %s | FP Extract: '%s'\n"),
-            kodeKelas.c_str(), kelas.c_str(), statusFp.c_str());
+        // Serial.printf_P(PSTR("[DEBUG-PARSE] Kode: %s | Kls: %s | FP Extract: '%s'\n"),
+        //     kodeKelas.c_str(), kelas.c_str(), statusFp.c_str());
 
         // Cari atau buat entri
         int idx = -1;
@@ -1880,6 +1876,15 @@ void APIManager::sendLoginAcknowledge(String nip, String pin, bool fetchDashboar
         if (!error && docAuth["token"].is<const char*>()) {
             token = docAuth["token"].as<const char*>();
             globalJwtToken = token;  // TUGAS 2: Simpan ke global variable untuk Push Queue
+            
+            // SIMPAN KE SD CARD UNTUK FITUR RESUME
+            File tokenFile = SD.open("/token.txt", FILE_WRITE);
+            if (tokenFile) {
+                tokenFile.print(globalJwtToken);
+                tokenFile.close();
+                Serial.println("[API-Langkah2] Token disimpan ke SD Card (/token.txt)");
+            }
+
             Serial.println("[API-Langkah2] Token berhasil didapatkan!: " + token);
 
             // ========== BYPASS DASHBOARD UNTUK ADMIN ==========

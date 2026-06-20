@@ -590,6 +590,40 @@ String FingerprintDataManager::getTimestamp() {
     return "API_DISCONNECTED";
 }
 
+String FingerprintDataManager::getLocalFpTimestamp(String userId, String role) {
+    String filename = (role == "mahasiswa") ? "/fingerprint_mahasiswa.csv" : "/fingerprint_users.csv";
+    File f = sd.open(filename.c_str(), "r");
+    if (!f) return "";
+
+    String timestamp = "";
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() < 5 || line.startsWith("id,")) continue;
+
+        int p1 = line.indexOf(',');
+        int p2 = line.indexOf(',', p1 + 1);
+        if (p1 <= 0 || p2 <= 0) continue;
+
+        String csvUserId = line.substring(p1 + 1, p2);
+        csvUserId.trim();
+        csvUserId.replace("\r", "");
+
+        if (csvUserId == userId) {
+            int colRoleEnd = line.indexOf(',', p2 + 1);
+            int colHexEnd = (colRoleEnd > 0) ? line.indexOf(',', colRoleEnd + 1) : -1;
+            if (colRoleEnd > 0 && colHexEnd > 0) {
+                timestamp = line.substring(colHexEnd + 1);
+                timestamp.trim();
+                timestamp.replace("\r", "");
+            }
+            break;
+        }
+    }
+    f.close();
+    return timestamp;
+}
+
 // ================= GET FINGERPRINT ID BY USER ID =================
 int FingerprintDataManager::getFingerprintIdByUserId(String userId) {
     File f = sd.open("/fingerprint_users.csv", "r");

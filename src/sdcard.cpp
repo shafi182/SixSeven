@@ -63,6 +63,15 @@ void initSDCardFiles() {
     ensureCSVFile("/fingerprint_users.csv",     "id,user_id,role,data_jari,created_at");
     ensureCSVFile("/fingerprint_mahasiswa.csv", "id,user_id,role,data_jari,created_at");
 
+    // --- Auto-save sesi (resume presensi/registrasi setelah alat mati) ---
+    // session.csv: 1 baris checkpoint (mode,nip,pin,role,kode_mk,kelas,kelas_id,status).
+    // session_scans.csv: kehadiran real-time (nim,timestamp) agar tidak hilang saat mati.
+    ensureCSVFile("/session.csv",               "mode,nip,pin,role,kode_mk,kelas,kelas_id,status");
+    ensureCSVFile("/session_scans.csv",         "nim,timestamp");
+    // session_fingermap.csv: snapshot slot->NIM/NIP saat sesi presensi mulai, agar
+    // resume tidak perlu inject ulang ke R503 (template di flash sudah persisten).
+    ensureCSVFile("/session_fingermap.csv",     "slot,user_id");
+
     // --- Presensi & antrian push ---
     ensureCSVFile("/presensi.csv",              "id,nim,kode_kelas,pertemuan_id,waktu,status");
     // pending_push.csv: dibuat kosong; header ditulis otomatis saat append pertama
