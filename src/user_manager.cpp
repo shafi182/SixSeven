@@ -1,5 +1,6 @@
 #include "user_manager.h"
 #include <SD.h>
+#include "mbedtls/md.h"
 
 extern SDCardManager sd;
 
@@ -90,9 +91,52 @@ bool UserManager::checkUser(String nip, String pin) {
         String fileNip = line.substring(p1 + 1, p2);
         String filePin = line.substring(p2 + 1, p3);
 
-        if (fileNip == nip && filePin == pin) {
-            f.close();
-            return true;
+        if (fileNip == nip) {
+            // Check if filePin is a sha256 pinv1 hash
+            if (filePin.startsWith("pinv1$sha256$")) {
+                int firstDollar = filePin.indexOf('$');
+                int secondDollar = filePin.indexOf('$', firstDollar + 1);
+                int thirdDollar = filePin.indexOf('$', secondDollar + 1);
+
+                if (firstDollar > 0 && secondDollar > 0 && thirdDollar > 0) {
+                    String salt = filePin.substring(secondDollar + 1, thirdDollar);
+                    String dbHash = filePin.substring(thirdDollar + 1);
+
+                    String payload = salt + ":" + nip + ":" + pin;
+                    
+                    // SHA-256 Calculation
+                    byte shaResult[32];
+                    mbedtls_md_context_t ctx;
+                    mbedtls_md_type_t md_type = MBEDTLS_MD_SHA256;
+
+                    mbedtls_md_init(&ctx);
+                    mbedtls_md_setup(&ctx, mbedtls_md_info_from_type(md_type), 0);
+                    mbedtls_md_starts(&ctx);
+                    mbedtls_md_update(&ctx, (const unsigned char*)payload.c_str(), payload.length());
+                    mbedtls_md_finish(&ctx, shaResult);
+                    mbedtls_md_free(&ctx);
+
+                    String computedHash = "";
+                    for (int i = 0; i < 32; i++) {
+                        char buf[3];
+                        sprintf(buf, "%02x", shaResult[i]);
+                        computedHash += buf;
+                    }
+
+                    if (computedHash == dbHash) {
+                        f.close();
+                        return true;
+                    }
+                }
+            } else if (filePin.startsWith("$2a$") || filePin.startsWith("$2b$") || filePin.startsWith("$2y$")) {
+                // Ignore bcrypt
+            } else {
+                // Fallback to plain text comparison
+                if (filePin == pin) {
+                    f.close();
+                    return true;
+                }
+            }
         }
     }
     f.close();
