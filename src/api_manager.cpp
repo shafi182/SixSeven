@@ -1843,6 +1843,7 @@ void APIManager::sendLoginAcknowledge(String nip, String pin, bool fetchDashboar
     Serial.println("[API-Langkah2] URL: " + url);
 
     http.begin(secureClient, url);
+    http.setTimeout(25000); // 25 seconds for Vercel cold starts
 
     // Add headers
     http.addHeader("Content-Type", "application/json");
