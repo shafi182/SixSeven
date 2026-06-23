@@ -1851,10 +1851,10 @@ void APIManager::sendLoginAcknowledge(String nip, String pin, bool fetchDashboar
     http.addHeader("x-device-code", DEVICE_CODE);
     http.addHeader("x-device-secret", DEVICE_SECRET);
 
-    // Create JSON body dengan nip dan pin sesuai revisi backend
+    // Create JSON body dengan nip dan pin_hash
     JsonDocument doc;
     doc["nip"] = nip;
-    doc["pin"] = pin;
+    doc["pin_hash"] = userManager.getUserHash(nip);
 
     String requestBody;
     serializeJson(doc, requestBody);

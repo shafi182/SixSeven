@@ -25,4 +25,6 @@ char KeypadManager::getKey() {
 void KeypadManager::init() {
     // Keypad library doesn't need explicit init
     // Just a placeholder for consistency
+    keypad.setDebounceTime(50);
+    keypad.setHoldTime(500);
 }

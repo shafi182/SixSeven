@@ -14,6 +14,7 @@ public:
     bool checkUser(String nip, String pin);
     bool isAdmin(String nip);
     bool isDosen(String nip);
+    String getUserHash(String nip);
 
     std::vector<String> getAllDosen();
 

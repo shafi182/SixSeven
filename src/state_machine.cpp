@@ -3005,9 +3005,9 @@ void StateMachine::update() {
                         String hexJari2 = trimHex(hex);
 
                         lcd->clear();
-                        lcd->printLine(0, F("Menyimpan ke Queue..."));
-                        lcd->printLine(1, "NIM: " + tempNIM);
-                        lcd->printLine(2, F("Akan di-push later"));
+                        lcd->printLine(0, F("Menyimpan ke"));
+                        lcd->printLine(1, F("Antrian..."));
+                        lcd->printLine(2, "NIM: " + tempNIM);
 
                         // Format: mahasiswa,NIM,fp_1_mhsw,fp_2_mhsw
                         bool ok = addMahasiswaToQueue(tempNIM, tempHexJari1, hexJari2);
@@ -3018,17 +3018,18 @@ void StateMachine::update() {
                         finger->delete_model(ENROLL_TEMP_SLOT_1);
                         finger->delete_model(ENROLL_TEMP_SLOT_2);
 
-                        lcd->clear();
                         if (ok) {
                             fingerprintManager.setLEDSuccess();
+                            lcd->clear();
                             lcd->printLine(0, F("ANTREAN DITAMBAH"));
                             lcd->printLine(1, "NIM: " + tempNIM);
-                            lcd->printLine(2, F("Tunggu push batch"));
+                            lcd->printLine(2, F("Tunggu Sesi Ditutup"));
                             logSystemActivity("ENROLL_MHS_2FP_QUEUED", "OK: " + tempNIM);
                             regSessionCount++;
                             if (tempIsSitIn) regSessionSitInCount++;
                         } else {
                             fingerprintManager.setLEDError();
+                            lcd->clear();
                             lcd->printLine(0, F("QUEUE GAGAL"));
                             lcd->printLine(1, F("Cek SD Card/Ulangi"));
                             lcd->printLine(2, "NIM: " + tempNIM);
@@ -3104,6 +3105,10 @@ void StateMachine::update() {
                     // ========== TUGAS 4: PROSES PUSH QUEUE ==========
                     // Proses antrian push sebelum kembali ke menu
                     // TUGAS 3: Proses hanya antrian miliknya sendiri
+                    lcd->clear();
+                    lcd->printLine(0, "Mengirimkan Data");
+                    lcd->printLine(1, "Hasil Registrasi");
+                    lcd->printLine(2, "Loading...");
                     processPushQueue(tempNIP);
 
                     lcd->clear();
@@ -5433,6 +5438,7 @@ void StateMachine::update() {
 
                 lcd->clear();
                 lcd->printLine(0, "Pull FP (" + String(pullIndex + 1) + "/" + String(targetCount) + ")");
+                lcd->printLine(1, F("Loading..."));
                 lcd->printLine(3, F("D.Batal"));
 
                 // Step 1: Build NIM list dibatasi MAX_PULL_BATCH
@@ -6158,6 +6164,11 @@ void StateMachine::update() {
                         }
                     } else {
                         // Fingerprint not found in mahasiswa
+                        String rawId = fingerMap[fingerId];
+                        rawId.trim();
+                        rawId.replace("\r", "");
+                        Serial.println("[PRESENSI] TDK DIKENALI. Sensor match pada Slot: " + String(fingerId) + " -> NIM/NIP: " + (rawId.length() > 0 ? rawId : "TIDAK ADA MAPPING"));
+
                         fingerprintManager.setLEDError();
                         lcd->clear();
                         lcd->printLine(0, "TDK DIKENALI");

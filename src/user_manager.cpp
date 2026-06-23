@@ -288,6 +288,41 @@ bool UserManager::isDosen(String nip) {
     return false;
 }
 
+// ================= GET USER HASH =================
+String UserManager::getUserHash(String nip) {
+    File f = sd.open("/users.csv", FILE_READ);
+    if (!f) return "";
+
+    while (f.available()) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0) continue;
+
+        int p1 = line.indexOf(',');
+        int p2 = line.indexOf(',', p1 + 1);
+        int p3 = line.indexOf(',', p2 + 1);
+        if (p1 < 0 || p2 < 0 || p3 < 0) continue;
+
+        String fileNip = line.substring(p1 + 1, p2);
+        String filePin = line.substring(p2 + 1, p3);
+
+        if (fileNip == nip) {
+            f.close();
+            if (filePin.startsWith("pinv1$sha256$")) {
+                int firstDollar = filePin.indexOf('$');
+                int secondDollar = filePin.indexOf('$', firstDollar + 1);
+                int thirdDollar = filePin.indexOf('$', secondDollar + 1);
+                if (firstDollar > 0 && secondDollar > 0 && thirdDollar > 0) {
+                    return filePin.substring(thirdDollar + 1);
+                }
+            }
+            return filePin; // Fallback jika bukan pinv1$sha256$
+        }
+    }
+    f.close();
+    return "";
+}
+
 // ================= GET ALL DOSEN =================
 std::vector<String> UserManager::getAllDosen() {
     std::vector<String> list;

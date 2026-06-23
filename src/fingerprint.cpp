@@ -229,53 +229,24 @@ bool FingerprintManager::isConnected() {
 }
 
 // ========== TUGAS 1: GET LOWEST AVAILABLE FINGERPRINT ID (IMPROVED) ==========
-// Cek slot yang benar-benar kosong di sensor (bukan hanya di CSV)
+// Cek slot yang benar-benar kosong di RAM map (karena RAM map merepresentasikan sesi berjalan)
 int FingerprintManager::getLowestAvailableFingerprintId() {
     // ========== TUGAS 1: Prioritaskan slot 3-200 untuk Mahasiswa ==========
     // Slot 1-2 reserved untuk Dosen
-    // Pertama, cek sensor langsung untuk slot yang benar-benar kosong
+    int capacity = finger->library_size;
+    if (capacity <= 0 || capacity > 200) capacity = 200;
 
-    for (int i = 3; i <= finger->library_size; i++) {
-        // Coba load model dari sensor
-        uint8_t p = finger->load_model(i, 1);
-        if (p == FP_NOTFOUND) {
-            // Slot kosong di sensor
-            Serial.printf("[GET_AVAIL_ID] Found empty slot in sensor: %d\n", i);
+    // Cari slot yang tidak digunakan oleh kelas/dosen di sesi ini
+    for (int i = 3; i <= capacity; i++) {
+        if (fingerMap[i] == "") {
+            Serial.printf("[GET_AVAIL_ID] Found available slot in fingerMap: %d\n", i);
             return i;
         }
-        // Slot sudah terisi atau error, lanjut ke slot berikutnya
     }
 
-    // ========== TUGAS 3: Jika semua slot penuh, cek CSV untuk cari slot yang bisa di-overwrite ==========
-    Serial.println("[GET_AVAIL_ID] All slots in sensor may be full, checking CSV...");
-
-    // Read from fingerprint_mahasiswa.csv untuk cari slot yang bisa overwrite
-    File file = SD.open("/fingerprint_mahasiswa.csv", FILE_READ);
-    if (file) {
-        while (file.available()) {
-            String line = file.readStringUntil('\n');
-            line.trim();
-            if (line.length() < 3) continue;
-            if (line.startsWith("id,") || line.startsWith("id,user")) continue;
-
-            int p1 = line.indexOf(',');
-            if (p1 > 0) {
-                String idStr = line.substring(0, p1);
-                idStr.trim();
-                int id = idStr.toInt();
-                // Slot 3+ yang sudah ada di CSV bisa di-overwrite
-                if (id >= 3 && id <= finger->library_size) {
-                    Serial.printf("[GET_AVAIL_ID] Can overwrite slot %d (mahasiswa exists in CSV)\n", id);
-                    file.close();
-                    return id;
-                }
-            }
-        }
-        file.close();
-    }
-
-    Serial.println("[GET_AVAIL_ID] No available ID found!");
-    return 0;
+    // Jika kelas super besar sehingga semua slot penuh, overwrite slot terakhir (200)
+    Serial.printf("[GET_AVAIL_ID] All slots in fingerMap are full! Fallback to slot %d\n", capacity);
+    return capacity;
 }
 
 // ========== TUGAS 1: LOAD TEMPLATES FROM CSV AT BOOT ==========
