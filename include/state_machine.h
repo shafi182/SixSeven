@@ -75,7 +75,9 @@ enum State {
     STATE_PRESENSI_INJECT_SENSOR,    // TAHAP 2: Flush + inject dosen & mahasiswa ke sensor R503
     STATE_PRESENSI_AUTH_START,       // Otorisasi dosen (awal) - PIN/FP
     STATE_PRESENSI_SCANNING,         // Proses scanning fingerprint mahasiswa
+    STATE_PRESENSI_MENU_LAINNYA,     // Menu Lainnya (Jari Terkendala, Sit-In)
     STATE_PRESENSI_CADANGAN,         // Presensi darurat (jari rusak) - input NIM + inject fp_2 on-demand
+    STATE_PRESENSI_SITIN,            // Presensi untuk Mahasiswa Sit-In (Input NIM, Pull, & Scan)
     STATE_PRESENSI_AUTH_END,         // Otorisasi dosen (akhir) - PIN/FP untuk tutup sesi
     STATE_PRESENSI_SAVE,             // Simpan data presensi ke SD Card
 

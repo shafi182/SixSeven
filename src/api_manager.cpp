@@ -46,7 +46,7 @@ bool isSyncUserFailed = false;
 // Index = Slot ID (1-200), Value = user_id (NIP/NIM)
 // Diisi saat boot dari fingerprint.csv, di-update saat enrollment baru
 String fingerMap[201];
-
+String fingerTimestamp[201];
 // ========== TUGAS 4: MAP UNTUK DATA MAHASISWA DARI API ==========
 // Digunakan untuk logika "tambal data" saat sinkronisasi
 #include <map>
@@ -593,6 +593,7 @@ String APIManager::apiLogin(int finger_id) {
     String url = String(API_BASE_URL) + "/api/device/login";
 
     http.begin(secureClient, url);
+    http.setTimeout(25000); // 25 seconds for Vercel cold starts
 
     // Add headers - Hanya x-device-code dan x-device-secret
     http.addHeader("Content-Type", "application/json");
@@ -776,6 +777,7 @@ JsonArray APIManager::fetchBatchStudentFingerprints(String nimList, String token
     Serial.printf("[BATCH_PULL] URL: %s\n", url.c_str());
 
     _batchPullHttp.begin(_batchPullClient, url);
+    _batchPullHttp.setTimeout(25000); // 25 seconds for Vercel cold starts
     _batchPullHttp.addHeader("Connection",      "keep-alive");  // eksplisit minta keep-alive
     _batchPullHttp.addHeader("Authorization",   "Bearer " + token);
     _batchPullHttp.addHeader("x-device-code",   DEVICE_CODE);
@@ -1452,6 +1454,7 @@ bool APIManager::fetchDataMahasiswa(String kode_mk, int kelas) {
     Serial.printf_P(PSTR("[DPK] URL: %s\n"), url.c_str());
 
     http.begin(secureClient, url);
+    http.setTimeout(25000); // 25 seconds for Vercel cold starts
     http.addHeader("Authorization", "Bearer " + globalJwtToken);
     http.addHeader("x-device-code", DEVICE_CODE);
     http.addHeader("x-device-secret", DEVICE_SECRET);

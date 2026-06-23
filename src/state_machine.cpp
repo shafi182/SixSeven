@@ -6077,13 +6077,8 @@ void StateMachine::update() {
                 lcd->printLine(0, "PRESENSI MULAI");
                 lcd->printLine(1, "Tempelkan Jari...");
                 lcd->printLine(2, "Hadir: " + String(listHadirCount));
-                // Opsi 'C.Rusak' hanya muncul di mode adaptif (kelas > 99, fp_2 belum diinjeksi).
-                // Kelas <= 99: fp_1 + fp_2 sudah di sensor -> tidak perlu menu cadangan.
-                if (isAdaptiveMode) {
-                    lcd->printLine(3, F("C.Rusak D.Selesai"));
-                } else {
-                    lcd->printLine(3, F("D.Selesai"));
-                }
+                // Opsi 'C.Lainnya' akan membuka menu tambahan (Jari Rusak & Sit-In)
+                lcd->printLine(3, F("C.Lainnya D.Selesai"));
                 needsRedraw = false;
 
                 fingerprintManager.setLEDScanning();
@@ -6100,13 +6095,11 @@ void StateMachine::update() {
                 break;
             }
 
-            // ========== BAGIAN 2: PRESENSI CADANGAN (hanya mode adaptif) ==========
-            // Tombol C aktif HANYA bila isAdaptiveMode (kelas > 99). Di kelas <=99
-            // fp_2 sudah di sensor, jadi C diabaikan.
-            if (key == 'C' && isAdaptiveMode) {
+            // Tombol C = Buka Menu Lainnya
+            if (key == 'C') {
                 fingerprintManager.setLEDOff();
-                logSystemActivity("PRESENSI", "Masuk mode cadangan (jari rusak)");
-                currentState = STATE_PRESENSI_CADANGAN;
+                logSystemActivity("PRESENSI", "Membuka Menu Lainnya");
+                currentState = STATE_PRESENSI_MENU_LAINNYA;
                 needRender = true;
                 break;
             }
@@ -6177,6 +6170,34 @@ void StateMachine::update() {
                     fingerprintManager.setLEDError();
                     needsRedraw = true;
                 }
+            }
+        }
+        break;
+
+        // ========== MENU LAINNYA ==========
+        case STATE_PRESENSI_MENU_LAINNYA:
+        {
+            if (needRender) {
+                lcd->clear();
+                lcd->printLine(0, "MENU LAINNYA");
+                lcd->printLine(1, "A.Jari Terkendala");
+                lcd->printLine(2, "B.Mahasiswa Sit-In");
+                lcd->printLine(3, "D.Kembali");
+                needRender = false;
+            }
+
+            char key = keypad->getKey();
+            if (key == 'A') {
+                logSystemActivity("MENU_LAINNYA", "Pilih Jari Terkendala (Cadangan)");
+                currentState = STATE_PRESENSI_CADANGAN;
+                needRender = true;
+            } else if (key == 'B') {
+                logSystemActivity("MENU_LAINNYA", "Pilih Mahasiswa Sit-In");
+                currentState = STATE_PRESENSI_SITIN;
+                needRender = true;
+            } else if (key == 'D') {
+                currentState = STATE_PRESENSI_SCANNING;
+                needRender = true;
             }
         }
         break;
@@ -6359,6 +6380,187 @@ void StateMachine::update() {
                         if (cadSlot == CAD_FALLBACK_SLOT) {
                             fingerprintManager.getFinger()->delete_model(CAD_FALLBACK_SLOT);
                         }
+                        fingerprintManager.setLEDOff();
+                        currentState = STATE_PRESENSI_SCANNING;
+                        needRender = true;
+                        break;
+                    } else if (fid == -2) {
+                        fingerprintManager.setLEDError();  // tidak dikenali, tetap di fase scan
+                    }
+                }
+            }
+        }
+        break;
+
+        // ========== BAGIAN 4: MAHASISWA SIT-IN ==========
+        case STATE_PRESENSI_SITIN:
+        {
+            // Sub-fase: 0 = input NIM, 1 = scan & match
+            static int sitinPhase = 0;
+            static String sitinNimBuffer = "";
+            static int sitinSlot = -1;
+            static unsigned long lastPoll = 0;
+            static bool needsRedraw = true;
+
+            if (needRender) {
+                sitinPhase = 0;
+                sitinNimBuffer = "";
+                sitinSlot = -1;
+                needsRedraw = true;
+                needRender = false;
+            }
+
+            // ---------- FASE 0: INPUT NIM ----------
+            if (sitinPhase == 0) {
+                if (needsRedraw) {
+                    lcd->clear();
+                    lcd->printLine(0, "SIT-IN PRESENSI");
+                    lcd->printLine(1, "Input NIM:");
+                    lcd->printLine(2, sitinNimBuffer.length() ? sitinNimBuffer : String("_"));
+                    lcd->printLine(3, "#.OK  D.Batal");
+                    needsRedraw = false;
+                }
+
+                char key = keypad->getKey();
+                if (key >= '0' && key <= '9') {
+                    if (sitinNimBuffer.length() < 12) sitinNimBuffer += key;
+                    needsRedraw = true;
+                } else if (key == 'A') {
+                    if (sitinNimBuffer.length() > 0) sitinNimBuffer.remove(sitinNimBuffer.length() - 1);
+                    needsRedraw = true;
+                } else if (key == 'D') {
+                    currentState = STATE_PRESENSI_MENU_LAINNYA;
+                    needRender = true;
+                    break;
+                } else if (key == '#') {
+                    if (sitinNimBuffer.length() != 8) { // Validasi format 8 digit
+                        lcd->clear();
+                        lcd->printLine(0, "NIM tidak valid");
+                        lcd->printLine(1, "Harus 8 digit!");
+                        delay(1200);
+                        needsRedraw = true;
+                        break;
+                    }
+
+                    lcd->clear();
+                    lcd->printLine(0, "Menarik data...");
+                    lcd->printLine(1, "NIM: " + sitinNimBuffer);
+                    
+                    JsonDocument doc;
+                    JsonArray result = apiManager.fetchBatchStudentFingerprints(sitinNimBuffer, globalJwtToken, doc);
+                    
+                    if (result.size() == 0 || result[0]["fp_1_mhsw"].isNull() || !result[0]["fp_1_mhsw"].is<String>()) {
+                        lcd->clear();
+                        lcd->printLine(0, "Belum teregistrasi,");
+                        lcd->printLine(1, "silakan registrasi");
+                        lcd->printLine(2, "terlebih dahulu");
+                        delay(2500);
+                        sitinNimBuffer = "";
+                        needsRedraw = true;
+                        break;
+                    }
+
+                    String fpHex = result[0]["fp_1_mhsw"].as<String>();
+                    if (fpHex.length() < 1000) {
+                        lcd->clear();
+                        lcd->printLine(0, "Fingerprint kosong");
+                        delay(2000);
+                        sitinNimBuffer = "";
+                        needsRedraw = true;
+                        break;
+                    }
+
+                    sitinSlot = fingerprintManager.findEmptySlot();
+                    if (sitinSlot <= 0) {
+                        lcd->clear();
+                        lcd->printLine(0, "Sensor Penuh!");
+                        delay(2000);
+                        sitinNimBuffer = "";
+                        needsRedraw = true;
+                        break;
+                    }
+
+                    lcd->printLine(2, "Inject slot " + String(sitinSlot) + "...");
+                    bool injOk = fingerprintManager.injectSingleFingerprint(sitinNimBuffer, fpHex, sitinSlot);
+                    
+                    if (!injOk) {
+                        lcd->clear();
+                        lcd->printLine(0, "Inject GAGAL");
+                        delay(1800);
+                        fingerMap[sitinSlot] = "BAD_SLOT";
+                        sitinNimBuffer = "";
+                        needsRedraw = true;
+                        break;
+                    }
+
+                    // Berhasil inject, rekam di fingerMap
+                    fingerMap[sitinSlot] = sitinNimBuffer;
+
+                    // Pindah ke fase scan
+                    sitinPhase = 1;
+                    needsRedraw = true;
+                    lastPoll = millis();
+                    fingerprintManager.setLEDScanning();
+                }
+            }
+            // ---------- FASE 1: SCAN & MATCH ----------
+            else if (sitinPhase == 1) {
+                if (needsRedraw) {
+                    lcd->clear();
+                    lcd->printLine(0, "SIT-IN: SCAN");
+                    lcd->printLine(1, "NIM: " + sitinNimBuffer);
+                    lcd->printLine(2, "Tempelkan jari");
+                    lcd->printLine(3, "D.Batal");
+                    needsRedraw = false;
+                }
+
+                char key = keypad->getKey();
+                if (key == 'D') {
+                    // Batalkan, hapus dari sensor untuk menghemat tempat (karena tidak masuk daftar classNims)
+                    fingerprintManager.getFinger()->delete_model(sitinSlot);
+                    fingerMap[sitinSlot] = ""; // Kosongkan
+                    fingerprintManager.setLEDOff();
+                    currentState = STATE_PRESENSI_SCANNING;
+                    needRender = true;
+                    break;
+                }
+
+                if (millis() - lastPoll > 250) {
+                    lastPoll = millis();
+                    int fid = fingerprintManager.checkFingerprint();
+
+                    if (fid > 0) {
+                        String matchedNim = (fid == sitinSlot) ? sitinNimBuffer : fingerMap[fid];
+                        matchedNim.trim();
+
+                        if (matchedNim == sitinNimBuffer) {
+                            bool already = false;
+                            for (int i = 0; i < listHadirCount; i++)
+                                if (listHadir[i] == sitinNimBuffer) { already = true; break; }
+
+                            if (!already && listHadirCount < 120) {
+                                listHadirTime[listHadirCount] = fingerprintDataManager.getTimestamp();
+                                appendSessionScan(sitinNimBuffer, listHadirTime[listHadirCount]);
+                                listHadir[listHadirCount++] = sitinNimBuffer;
+                                logSystemActivity("PRESENSI_SITIN", "Hadir Sit-In slot " + String(sitinSlot) + ": " + sitinNimBuffer);
+                            }
+
+                            fingerprintManager.setLEDSuccess();
+                            lcd->clear();
+                            lcd->printLine(0, already ? "SUDAH ABSEN" : "HADIR! (SIT-IN)");
+                            lcd->printLine(1, "NIM: " + sitinNimBuffer);
+                            delay(1800);
+                            
+                            // Hapus fingerprint Sit-In dari sensor agar tidak menumpuk?
+                            // Boleh dibiarkan atau dihapus. Kita biarkan saja agar bisa dipakai lagi jika diperlukan.
+                        } else {
+                            fingerprintManager.setLEDError();
+                            lcd->clear();
+                            lcd->printLine(0, "JARI TIDAK COCOK");
+                            lcd->printLine(1, "dgn NIM tsb");
+                            delay(1800);
+                        }
+
                         fingerprintManager.setLEDOff();
                         currentState = STATE_PRESENSI_SCANNING;
                         needRender = true;

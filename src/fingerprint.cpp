@@ -2,6 +2,7 @@
 #include "config.h"
 #include "user_manager.h"
 #include "api_manager.h"   // readFp2Sidecar() untuk Adaptive Loading fp_2
+#include "lcd.h"
 #include <SD.h>
 
 #include <Arduino.h>
@@ -10,6 +11,7 @@
 
 // ========== EXTERNAL FINGERPINT MAP ( dari api_manager.cpp ) ==========
 extern String fingerMap[201];
+extern String fingerTimestamp[201];
 
 // ========== DEBUG: PRINT SELURUH FINGERPINT MAP ==========
 void printFingerMap() {
@@ -19,8 +21,8 @@ void printFingerMap() {
 
     int count = 0;
     for (int i = 1; i <= 200; i++) {
-        if (fingerMap[i] && fingerMap[i].length() > 0) {
-            Serial.printf_P(PSTR("Slot[%03d] = %s\n"), i, fingerMap[i].c_str());
+        if (fingerMap[i].length() > 0) {
+            Serial.printf_P(PSTR("Slot[%03d] = %s (ts: %s)\n"), i, fingerMap[i].c_str(), fingerTimestamp[i].c_str());
             count++;
         }
     }
@@ -28,6 +30,65 @@ void printFingerMap() {
     Serial.println(F("========================================"));
     Serial.printf_P(PSTR("Total fingerprint terregister: %d\n"), count);
     Serial.println(F("========================================"));
+}
+
+// ========== PERSISTENT SENSOR MAP ==========
+void FingerprintManager::loadSensorMap() {
+    Serial.println(F("[SENSOR_MAP] Loading persistent sensor map..."));
+    for(int i=0; i<=200; i++) { 
+        fingerMap[i] = ""; 
+        fingerTimestamp[i] = ""; 
+    }
+    
+    File f = SD.open("/sensor_map.csv", FILE_READ);
+    if (f) {
+        if (f.available()) f.readStringUntil('\n'); // skip header
+        int count = 0;
+        while (f.available()) {
+            String line = f.readStringUntil('\n');
+            line.trim();
+            if(line.length() < 3) continue;
+            
+            int p1 = line.indexOf(',');
+            int p2 = line.indexOf(',', p1+1);
+            if (p1 > 0 && p2 > 0) {
+                int slot = line.substring(0, p1).toInt();
+                String uid = line.substring(p1+1, p2);
+                String ts = line.substring(p2+1);
+                
+                uid.trim(); ts.trim();
+                
+                if (slot >= 1 && slot <= 200) {
+                    fingerMap[slot] = uid;
+                    fingerTimestamp[slot] = ts;
+                    count++;
+                }
+            }
+        }
+        f.close();
+        Serial.printf_P(PSTR("[SENSOR_MAP] Loaded %d entries from /sensor_map.csv\n"), count);
+    } else {
+        Serial.println(F("[SENSOR_MAP] /sensor_map.csv tidak ditemukan, RAM kosong."));
+    }
+}
+
+void FingerprintManager::saveSensorMap() {
+    Serial.println(F("[SENSOR_MAP] Saving persistent sensor map..."));
+    File f = SD.open("/sensor_map.csv", FILE_WRITE);
+    if (f) {
+        f.println("slot,user_id,timestamp");
+        int count = 0;
+        for(int i=1; i<=200; i++) {
+            if (fingerMap[i].length() > 0) {
+                f.printf("%d,%s,%s\n", i, fingerMap[i].c_str(), fingerTimestamp[i].c_str());
+                count++;
+            }
+        }
+        f.close();
+        Serial.printf_P(PSTR("[SENSOR_MAP] Saved %d entries to /sensor_map.csv\n"), count);
+    } else {
+        Serial.println(F("[SENSOR_MAP] ERROR: Gagal menulis /sensor_map.csv"));
+    }
 }
 
 const char* fpGetErrorString(uint8_t err) {
@@ -147,6 +208,16 @@ void FingerprintManager::init() {
             Serial.println("[INIT] Template Count: " + String(finger->template_count));
             Serial.println("[INIT] Baud Param (N): " + String(finger->baudrate_param) + " -> " + String((int)finger->baudrate_param * 9600) + " bps");
             Serial.println("[INIT] Pkt Size Param: " + String(finger->data_packet_size) + " (3 = 256B)");
+        }
+
+        // ========== PERSISTENT SENSOR MAP LOGIC ==========
+        finger->count_templates();
+        if (finger->template_count == 0) {
+            Serial.println(F("[INIT] Fisik sensor KOSONG! Mereset RAM dan file persisten."));
+            for(int i=0; i<=200; i++) { fingerMap[i] = ""; fingerTimestamp[i] = ""; }
+            saveSensorMap();
+        } else {
+            loadSensorMap();
         }
     } else {
         Serial.println("[INIT] Fingerprint sensor NOT FOUND!");
@@ -402,19 +473,8 @@ bool FingerprintManager::injectSingleFingerprint(String nim, String hexData, int
     for (int retry = 0; retry < MAX_RETRIES; retry++) {
         if (retry > 0) {
             Serial.printf("[INJECT_FP] Retry %d/%d untuk NIM %s di slot %d...\n", retry, MAX_RETRIES - 1, nim.c_str(), slot);
-            delay(100);  // Jeda sebelum retry
+            delay(200);  // Jeda sebelum retry
         }
-
-        // ========== TUGAS 1: HAPUS SEBELUM TULIS ==========
-        // Hapus template lama di slot tersebut sebelum menulis yang baru
-        result = finger->delete_model(slot);
-        if (result != FP_OK && result != FP_BADLOCATION && result != FP_NOTFOUND) {
-            Serial.printf("[INJECT_FP] Warning: delete_model at slot %d returned: %d\n", slot, result);
-            // Lanjutkan meskipun delete gagal (slot mungkin kosong)
-        }
-
-        // ========== TUGAS 2: DELAY ANTAR PERINTAH ==========
-        delay(100);
 
         // Send to sensor buffer
         result = finger->send_fpdata(raw, rawLen, FP_BUFFER_CHAR, 1);
@@ -423,20 +483,12 @@ bool FingerprintManager::injectSingleFingerprint(String nim, String hexData, int
             continue;  // Coba lagi
         }
 
-        // ========== TUGAS 2: DELAY SEBELUM STORE ==========
-        delay(100);
-
-        // ========== DOUBLE GUARD: Hapus ulang sebelum store untuk mencegah Error 24 ==========
-        finger->delete_model(slot);
-        delay(50);
+        // Delay panjang agar sensor benar-benar selesai menulis buffer internal sebelum mulai write ke flash
+        delay(300);
 
         // Store in sensor
         result = finger->store_model(slot, 1);
         if (result == FP_OK) {
-            // ========== TUGAS 4: OPTIMASI WAKTU ==========
-            // Beri waktu sensor untuk menulis ke flash
-            delay(50);
-
             // Update fingerMap
             fingerMap[slot] = nim;
             Serial.printf_P(PSTR("[INJECT_FP] Berhasil inject NIM %s ke Slot %d\n"), nim.c_str(), slot);
@@ -715,14 +767,28 @@ bool FingerprintManager::syncFromCSV(UserManager* userManager) {
             int slot = line.substring(0, p1).toInt();
             String userId = line.substring(p1 + 1, p2);
             String hexData = line.substring(p3 + 1, p4);
+            String csvTs = line.substring(p4 + 1);
 
             userId.trim();
             hexData.trim();
+            csvTs.trim();
 
             if (hexData.length() < 1000) continue;
             if (slot > 0 && slot <= 200) {
-                if (injectSingleFingerprint(userId, hexData, slot)) {
-                    totalInjected++;
+                // Bandingkan timestamp jika slot sudah terisi user yang sama
+                bool shouldInject = true;
+                if (fingerMap[slot] == userId) {
+                    if (csvTs <= fingerTimestamp[slot]) {
+                        shouldInject = false; // Sudah up-to-date
+                    }
+                }
+                
+                if (shouldInject) {
+                    if (injectSingleFingerprint(userId, hexData, slot)) {
+                        fingerMap[slot] = userId;
+                        fingerTimestamp[slot] = csvTs;
+                        totalInjected++;
+                    }
                 }
             }
         }
@@ -732,6 +798,9 @@ bool FingerprintManager::syncFromCSV(UserManager* userManager) {
     // ========== STEP 3: SYNC RAM ==========
     Serial.println(F("[SYNC] ======================================="));
     Serial.println(F("[SYNC] STEP 3: SYNC RAM (fingerMap)..."));
+
+    // Save persistent map since we might have updated some templates
+    saveSensorMap();
 
     // Final verification
     finger->count_templates();
@@ -1111,48 +1180,65 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
 
     int dosenInjected = 0;
     // Cek existing dosen
-    int currentDosenSlots = 0;
+    std::vector<int> existingDosenSlots;
     for (int i = 1; i <= 200; i++) {
-        if (fingerMap[i] == dosenNip) currentDosenSlots++;
+        if (fingerMap[i] == dosenNip) existingDosenSlots.push_back(i);
     }
 
-    if (currentDosenSlots < 2) {
-        File f = SD.open("/fingerprint_users.csv", FILE_READ);
-        if (f) {
-            if (f.available()) f.readStringUntil('\n'); // Skip header
-            while (f.available() && currentDosenSlots < 2) {
-                String line = f.readStringUntil('\n');
-                line.trim();
-                if (line.length() < 10) continue;
-                if (line.startsWith(F("id,")) || line.startsWith(F("id,user"))) continue;
+    File f = SD.open("/fingerprint_users.csv", FILE_READ);
+    if (f) {
+        if (f.available()) f.readStringUntil('\n'); // Skip header
+        while (f.available()) {
+            String line = f.readStringUntil('\n');
+            line.trim();
+            if (line.length() < 10) continue;
+            if (line.startsWith(F("id,")) || line.startsWith(F("id,user"))) continue;
 
-                int p1 = line.indexOf(',');
-                int p2 = line.indexOf(',', p1 + 1);
-                int p3 = line.indexOf(',', p2 + 1);
-                int p4 = line.indexOf(',', p3 + 1);
-                if (p1 <= 0 || p2 <= 0 || p3 <= 0 || p4 <= 0) continue;
+            int p1 = line.indexOf(',');
+            int p2 = line.indexOf(',', p1 + 1);
+            int p3 = line.indexOf(',', p2 + 1);
+            int p4 = line.indexOf(',', p3 + 1);
+            if (p1 <= 0 || p2 <= 0 || p3 <= 0 || p4 <= 0) continue;
 
-                String userId = line.substring(p1 + 1, p2);
-                String hexData = line.substring(p3 + 1, p4);
-                userId.trim(); hexData.trim();
+            String userId = line.substring(p1 + 1, p2);
+            String hexData = line.substring(p3 + 1, p4);
+            String csvTs = line.substring(p4 + 1);
+            userId.trim(); hexData.trim(); csvTs.trim();
 
-                if (userId != dosenNip) continue;
-                if (hexData.length() < 1000) continue;
+            if (userId != dosenNip) continue;
+            if (hexData.length() < 1000) continue;
 
+            bool injected = false;
+            if (!existingDosenSlots.empty()) {
+                int slotToOverwrite = existingDosenSlots[0];
+                if (csvTs > fingerTimestamp[slotToOverwrite]) {
+                    if (injectSingleFingerprint(userId, hexData, slotToOverwrite)) {
+                        fingerTimestamp[slotToOverwrite] = csvTs;
+                        dosenInjected++;
+                        Serial.printf_P(PSTR("[PRESENSI_INJECT] OVERWRITE Dosen: %s ke slot %d\n"), userId.c_str(), slotToOverwrite);
+                    }
+                }
+                injected = true;
+                existingDosenSlots.erase(existingDosenSlots.begin());
+            }
+
+            if (!injected) {
                 int slot = findEmptySlot();
                 if (slot > 0) {
                     if (injectSingleFingerprint(userId, hexData, slot)) {
                         dosenInjected++;
                         fingerMap[slot] = userId;
-                        currentDosenSlots++;
-                        Serial.printf_P(PSTR("[PRESENSI_INJECT] Injected Dosen: %s ke slot %d\n"), userId.c_str(), slot);
+                        fingerTimestamp[slot] = csvTs;
+                        Serial.printf_P(PSTR("[PRESENSI_INJECT] NEW Dosen: %s ke slot %d\n"), userId.c_str(), slot);
+                    } else {
+                        fingerMap[slot] = "BAD_SLOT"; // Tandai agar tidak diulangi lagi
                     }
                 }
             }
-            f.close();
         }
+        f.close();
     } else {
-        Serial.printf_P(PSTR("[PRESENSI_INJECT] Dosen %s sudah ada di sensor (Skipped).\n"), dosenNip.c_str());
+        Serial.println(F("[PRESENSI_INJECT] ERROR: Gagal buka fingerprint_users.csv"));
     }
 
     // ========== STEP 5: INJECT MAHASISWA ==========
@@ -1161,6 +1247,7 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
 
     int mhsInjected = 0;
     int mhsSkipped = 0;
+    int processedMhs = 0;
 
     File fpFile = SD.open("/fingerprint_mahasiswa.csv", FILE_READ);
     if (fpFile) {
@@ -1179,50 +1266,85 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
             if (p1 <= 0 || p2 <= 0 || p3 <= 0 || p4 <= 0) continue;
 
             String csvNim = line.substring(p1 + 1, p2);
+            String hexData = line.substring(p3 + 1, p4);
+            String csvTs = line.substring(p4 + 1);
+            
             csvNim.trim(); csvNim.replace("\r", "");
+            hexData.trim();
+            csvTs.trim(); csvTs.replace("\r", "");
 
+            int mhsCount = classNims.size();
             bool inClass = false;
             for (size_t i = 0; i < classNims.size(); i++) {
                 if (classNims[i] == csvNim) { inClass = true; break; }
             }
             if (!inClass) continue;
+            
+            processedMhs++;
+            lcd.printLine(3, "Progress: " + String(processedMhs) + "/" + String(mhsCount));
 
-            // Cek sudah berapa kali NIM ini ada di fingerMap
-            int existingCount = 0;
+            // Find all existing slots for this NIM
+            std::vector<int> existingSlots;
             for (int i = 1; i <= 200; i++) {
-                if (fingerMap[i] == csvNim) existingCount++;
+                if (fingerMap[i] == csvNim) existingSlots.push_back(i);
             }
 
-            if (existingCount >= targetPerMhs) {
-                mhsSkipped++;
-                continue; // Sudah komplit
-            }
-
-            // Butuh inject fp_1?
-            if (existingCount == 0) {
-                String hexData = line.substring(p3 + 1, p4);
-                hexData.trim();
-                if (hexData.length() >= 1000) {
+            // --- Proses fp_1 ---
+            if (hexData.length() >= 1000) {
+                if (existingSlots.size() > 0) {
+                    int slot1 = existingSlots[0];
+                    if (csvTs > fingerTimestamp[slot1]) {
+                        if (injectSingleFingerprint(csvNim, hexData, slot1)) {
+                            mhsInjected++;
+                            fingerTimestamp[slot1] = csvTs;
+                            Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_1 OVERWRITE mhs: %s ke slot %d\n"), csvNim.c_str(), slot1);
+                        }
+                    } else {
+                        mhsSkipped++;
+                    }
+                } else {
                     int slot = findEmptySlot();
-                    if (slot > 0 && injectSingleFingerprint(csvNim, hexData, slot)) {
-                        mhsInjected++;
-                        fingerMap[slot] = csvNim;
-                        existingCount++;
-                        Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_1 mhs: %s ke slot %d\n"), csvNim.c_str(), slot);
+                    if (slot > 0) {
+                        if (injectSingleFingerprint(csvNim, hexData, slot)) {
+                            mhsInjected++;
+                            fingerMap[slot] = csvNim;
+                            fingerTimestamp[slot] = csvTs;
+                            existingSlots.push_back(slot); // agar fp_2 tau slot fp_1 sudah ada
+                            Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_1 NEW mhs: %s ke slot %d\n"), csvNim.c_str(), slot);
+                        } else {
+                            fingerMap[slot] = "BAD_SLOT";
+                        }
                     }
                 }
             }
 
-            // Butuh inject fp_2?
-            if (injectDual && existingCount < 2) {
+            // --- Proses fp_2 ---
+            if (injectDual) {
                 String fp2Hex = readFp2Sidecar(csvNim);
                 if (fp2Hex.length() >= 1000) {
-                    int slot = findEmptySlot();
-                    if (slot > 0 && injectSingleFingerprint(csvNim, fp2Hex, slot)) {
-                        mhsInjected++;
-                        fingerMap[slot] = csvNim;
-                        existingCount++;
-                        Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_2 mhs: %s ke slot %d\n"), csvNim.c_str(), slot);
+                    if (existingSlots.size() > 1) { // fp_2 sudah punya slot
+                        int slot2 = existingSlots[1];
+                        if (csvTs > fingerTimestamp[slot2]) {
+                            if (injectSingleFingerprint(csvNim, fp2Hex, slot2)) {
+                                mhsInjected++;
+                                fingerTimestamp[slot2] = csvTs;
+                                Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_2 OVERWRITE mhs: %s ke slot %d\n"), csvNim.c_str(), slot2);
+                            }
+                        } else {
+                            mhsSkipped++;
+                        }
+                    } else {
+                        int slot = findEmptySlot();
+                        if (slot > 0) {
+                            if (injectSingleFingerprint(csvNim, fp2Hex, slot)) {
+                                mhsInjected++;
+                                fingerMap[slot] = csvNim;
+                                fingerTimestamp[slot] = csvTs;
+                                Serial.printf_P(PSTR("[PRESENSI_INJECT] fp_2 NEW mhs: %s ke slot %d\n"), csvNim.c_str(), slot);
+                            } else {
+                                fingerMap[slot] = "BAD_SLOT";
+                            }
+                        }
                     }
                 }
             }
@@ -1230,7 +1352,10 @@ bool FingerprintManager::flushAndInjectPresensiUsers(String kodeKelas, String ke
         fpFile.close();
     }
 
-    Serial.printf_P(PSTR("[PRESENSI_INJECT] Mahasiswa injected: %d (Skipped: %d)\n"), mhsInjected, mhsSkipped);
+    Serial.printf_P(PSTR("[PRESENSI_INJECT] Mahasiswa injected: %d (Skipped/Up-to-date: %d)\n"), mhsInjected, mhsSkipped);
+
+    // ========== STEP 6: SAVE SENSOR MAP ==========
+    saveSensorMap();
 
     // ========== FINAL VERIFICATION ==========
     finger->count_templates();

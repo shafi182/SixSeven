@@ -29,6 +29,8 @@ private:
 public:
     FingerprintManager();
     void init();
+    void loadSensorMap();
+    void saveSensorMap();
 
     // ========== TUGAS 1: LOAD TEMPLATE FROM CSV AT BOOT ==========
     void loadTemplatesFromCSV(FingerprintDataManager* dataManager);
