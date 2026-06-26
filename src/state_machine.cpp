@@ -1541,20 +1541,20 @@ void StateMachine::update() {
 
                     if (syncStatusDashboard) {
                         // Sync SUKSES: layout Next normal
-                        lcd->printLine(1, F("A.Daftar Fingerprint"));
-                        lcd->printLine(2, F("B.Setup WiFi       "));
+                        lcd->printLine(1, F("A.Randomizer Mhs    "));
+                        lcd->printLine(2, F("B.Daftar Fingerprint"));
                     } else {
                         // Sync GAGAL: Registrasi tergeser ke sini; Setup WiFi tetap
                         // dapat diakses langsung agar user bisa benerin WiFi sebelum retry.
-                        lcd->printLine(1, F("A.Registrasi Mhs   "));
-                        lcd->printLine(2, F("B.Setup WiFi       "));
+                        lcd->printLine(1, F("A.Registrasi Mhs    "));
+                        lcd->printLine(2, F("B.Randomizer Mhs    "));
                     }
                     lcd->printLine(3, F("C.Next   D.Kembali  "));
                 } else if (menuPage == 2) {
                     lcd->printLine(0, F("MENU DOSEN ===="));
                     drawStatusIcons();
-                    lcd->printLine(1, F("A.Ekspor Data      "));
-                    lcd->printLine(2, F("                    "));
+                    lcd->printLine(1, F("A.Setup WiFi        "));
+                    lcd->printLine(2, F("B.Ekspor Data       "));
                     lcd->printLine(3, F("C.Next   D.Kembali  "));
                 }
                 needsRedraw = false;
@@ -1634,21 +1634,34 @@ void StateMachine::update() {
                             currentState = STATE_REG_MHS_PILIH_KELAS;
                             needRender = true;
                         } else {
-                            // ----- MODE SUKSES: A = Daftar Fingerprint -----
+                            // ----- MODE SUKSES: A = Randomizer Mhs -----
+                            logSystemActivity("MENU_NAV", "Dosen: " + tempNIP + " membuka Randomizer Mhs");
+                            currentState = STATE_RANDOM_SELECT_KELAS;
+                            needRender = true;
+                        }
+                    } else if (key == 'B') {
+                        if (!syncStatusDashboard) {
+                            // ----- MODE GAGAL: B = Randomizer Mhs -----
+                            logSystemActivity("MENU_NAV", "Dosen: " + tempNIP + " membuka Randomizer Mhs");
+                            currentState = STATE_RANDOM_SELECT_KELAS;
+                            needRender = true;
+                        } else {
+                            // ----- MODE SUKSES: B = Daftar Fingerprint -----
                             logSystemActivity("MENU_NAV", "Dosen: " + tempNIP + " membuka Daftar Fingerprint");
                             currentState = STATE_ENROLL_DOSEN_FINGERPRINT;
                             needRender = true;
                         }
-                    } else if (key == 'B') {
-                        // B = Setup WiFi (langsung, tanpa sub-menu "Lainnya")
+                    }
+                } else if (menuPage == 2) {
+                    if (key == 'A') {
+                        // A = Setup WiFi
                         logSystemActivity("MENU_NAV", "Dosen: " + tempNIP + " membuka Setup WiFi");
                         wifiReturnState = STATE_MENU_DOSEN;     // selesai Setup WiFi -> kembali ke Menu Dosen
                         currentState   = STATE_WIFI_BROWSE;
                         needRender = true;
-                    }
-                } else if (menuPage == 2) {
-                    if (key == 'A') {
-                        logSystemActivity("MENU_NAV", "Dosen: " + tempNIP + " membuka Ekspor Data AP");
+                    } else if (key == 'B') {
+                        // B = Ekspor Data
+                        logSystemActivity("MENU_NAV", "Dosen: " + tempNIP + " membuka Ekspor Data");
                         currentState = STATE_EKSPOR_AP;
                         needRender = true;
                     }
@@ -4959,6 +4972,272 @@ void StateMachine::update() {
             // TUGAS: Jangan discard tombol di sini - biarkan tombol masuk ke state berikutnya
             // Hanya flush jika ada tombol yang pending dan state berikutnya membutuhkannya
             // keypad->getKey();  // DIHAPUS - menyebabkan tombol pertama terbuang saat transisi
+        }
+        break;
+
+        // ================= RANDOMIZER MAHASISWA =================
+        case STATE_RANDOM_SELECT_KELAS:
+        {
+            static bool isInitialized = false;
+            static bool needsRedraw = true;
+            static int currentPage = 0;
+            static String classListKode[20];
+            static String classListKelas[20];
+            static String classListKelasId[20];
+            static int classCount = 0;
+            static String tempInput = "";
+            static bool inputMode = false;
+
+            if (needRender) {
+                isInitialized = false;
+                needsRedraw = true;
+                currentPage = 0;
+                classCount = 0;
+                tempInput = "";
+                inputMode = false;
+                needRender = false;
+            }
+
+            if (!isInitialized) {
+                lcd->clear();
+                lcd->printLine(0, "RANDOMIZER MHS");
+                lcd->printLine(1, MSG_LOADING);
+                classCount = loadKelasByNIP(tempNIP, classListKode, classListKelas, 20, classListKelasId);
+
+                if (classCount == 0) {
+                    lcd->clear();
+                    lcd->printLine(0, "TIDAK ADA KELAS");
+                    lcd->printLine(1, "TERDAFTAR!");
+                    delay(1500);
+                    currentState = STATE_MENU_DOSEN;
+                    needRender = true;
+                    break;
+                }
+                isInitialized = true;
+                needsRedraw = true;
+            }
+
+            if (needsRedraw) {
+                lcd->clear();
+                if (inputMode) {
+                    lcd->printLine(0, "MASUKKAN PILIHAN:");
+                    lcd->printLine(1, "No: " + tempInput + "_");
+                    lcd->printLine(2, "Max: " + String(classCount));
+                    lcd->printLine(3, "#:OK  D:Batal");
+                } else {
+                    int totalPages = (classCount + 1) / 2;
+                    if (totalPages == 0) totalPages = 1;
+                    if (currentPage >= totalPages) currentPage = totalPages - 1;
+                    if (currentPage < 0) currentPage = 0;
+
+                    lcd->printLine(0, "PILIH KELAS ===");
+                    int idx1 = currentPage * 2;
+                    int idx2 = idx1 + 1;
+
+                    if (idx1 < classCount) {
+                        String display1 = String(idx1 + 1) + ". " + classListKode[idx1];
+                        lcd->printLine(1, display1);
+                    }
+                    if (idx2 < classCount) {
+                        String display2 = String(idx2 + 1) + ". " + classListKode[idx2];
+                        lcd->printLine(2, display2);
+                    }
+                    if(currentPage == 1){
+                        lcd->printLine(3, "C.Next  D.Exit");
+                    } else {
+                        lcd->printLine(3, "C.Next  D.Back");
+                    }
+                }
+                needsRedraw = false;
+            }
+
+            char key = keypad->getKey();
+            if (key >= '0' && key <= '9') {
+                if (tempInput.length() < 2) {
+                    tempInput += key;
+                    inputMode = true;
+                    needsRedraw = true;
+                }
+            }
+            else if (key == '#') {
+                if (tempInput.length() > 0) {
+                    int selectedIdx = tempInput.toInt() - 1;
+                    if (selectedIdx >= 0 && selectedIdx < classCount) {
+                        presensiKodeMk = classListKode[selectedIdx];
+                        presensiKelas = classListKelas[selectedIdx];
+                        presensiKelasId = classListKelasId[selectedIdx];
+                        presensiKodeMk.trim(); presensiKodeMk.replace("\r", "");
+                        presensiKelas.trim(); presensiKelas.replace("\r", "");
+                        presensiKelasId.trim(); presensiKelasId.replace("\r", "");
+
+                        tempInput = "";
+                        inputMode = false;
+                        currentState = STATE_RANDOM_EXECUTE;
+                        needRender = true;
+                    } else {
+                        lcd->clear();
+                        lcd->printLine(0, "NOMOR TIDAK VALID!");
+                        lcd->printLine(1, "Input: " + tempInput);
+                        lcd->printLine(2, "Max: " + String(classCount));
+                        delay(1500);
+                        tempInput = "";
+                        inputMode = false;
+                        needsRedraw = true;
+                    }
+                }
+            }
+            else if (key == 'A') {
+                if (inputMode) {
+                    if (tempInput.length() > 0) tempInput.remove(tempInput.length() - 1);
+                    else inputMode = false;
+                    needsRedraw = true;
+                }
+            }
+            else if (key == 'C') {
+                if (!inputMode) {
+                    int totalPages = (classCount + 1) / 2;
+                    if (totalPages == 0) totalPages = 1;
+                    if (currentPage < totalPages - 1) currentPage++;
+                    else currentPage = 0;
+                    needsRedraw = true;
+                }
+            }
+            else if (key == 'D') {
+                if (inputMode) {
+                    if (tempInput.length() > 0) tempInput.remove(tempInput.length() - 1);
+                    else inputMode = false;
+                    needsRedraw = true;
+                } else if (currentPage > 0) {
+                    currentPage--;
+                    needsRedraw = true;
+                } else {
+                    currentState = STATE_MENU_DOSEN;
+                    needRender = true;
+                }
+            }
+        }
+        break;
+
+        case STATE_RANDOM_EXECUTE:
+        {
+            if (needRender) {
+                lcd->clear();
+                lcd->printLine(0, "MENCARI DATA...");
+                lcd->printLine(1, presensiKodeMk + "-" + presensiKelas);
+                
+                String targetKodeKelas = presensiKodeMk + "-" + presensiKelas;
+                targetKodeKelas.trim();
+                
+                // Read from /presensi.csv
+                File f = SD.open("/presensi.csv", FILE_READ);
+                String* nims = new String[200];
+                int nimCount = 0;
+                bool validSessionFound = false;
+
+                if (f) {
+                    if (f.available()) f.readStringUntil('\n'); // skip header
+                    time_t nowTime;
+                    time(&nowTime);
+
+                    while (f.available()) {
+                        String line = f.readStringUntil('\n');
+                        line.trim();
+                        if (line.length() < 5) continue;
+                        
+                        // Format: id,nim,kode_kelas,pertemuan_id,waktu,status
+                        int p1 = line.indexOf(',');
+                        int p2 = line.indexOf(',', p1 + 1);
+                        int p3 = line.indexOf(',', p2 + 1);
+                        int p4 = line.indexOf(',', p3 + 1);
+                        int p5 = line.indexOf(',', p4 + 1);
+                        
+                        if (p1 > 0 && p2 > 0 && p3 > 0 && p4 > 0 && p5 > 0) {
+                            String nim = line.substring(p1 + 1, p2);
+                            String kodeKelas = line.substring(p2 + 1, p3);
+                            String waktu = line.substring(p4 + 1, p5);
+                            String status = line.substring(p5 + 1);
+                            
+                            kodeKelas.trim();
+                            waktu.trim();
+                            status.trim();
+                            
+                            if (kodeKelas == targetKodeKelas && status == "hadir") {
+                                bool isRecent = false;
+                                if (waktu == "PRESENSI" || waktu == "WAKTU_BELUM_SINKRON") {
+                                    // If offline, just accept it (user warning provided in design)
+                                    isRecent = true;
+                                } else {
+                                    struct tm tm;
+                                    memset(&tm, 0, sizeof(struct tm));
+                                    // Parse "DD-MM-YYYY HH:MM:SS"
+                                    if (strptime(waktu.c_str(), "%d-%m-%Y %H:%M:%S", &tm) != NULL) {
+                                        time_t recordTime = mktime(&tm);
+                                        if (abs(difftime(nowTime, recordTime)) <= 4 * 3600) {
+                                            isRecent = true;
+                                        }
+                                    }
+                                }
+                                
+                                if (isRecent) {
+                                    validSessionFound = true;
+                                    if (nimCount < 200) {
+                                        // Avoid duplicates just in case
+                                        bool dup = false;
+                                        for (int i = 0; i < nimCount; i++) {
+                                            if (nims[i] == nim) { dup = true; break; }
+                                        }
+                                        if (!dup) nims[nimCount++] = nim;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    f.close();
+                }
+
+                if (!validSessionFound || nimCount == 0) {
+                    delete[] nims; // Free memory!
+                    lcd->clear();
+                    lcd->printLine(0, "BELUM PRESENSI!");
+                    lcd->printLine(1, "Max 4 jam terakhir");
+                    lcd->printLine(3, "D.Kembali");
+                    
+                    // Wait for 'D'
+                    while (true) {
+                        if (keypad->getKey() == 'D') break;
+                        delay(50);
+                    }
+                    currentState = STATE_MENU_DOSEN;
+                    needRender = true;
+                } else {
+                    // Randomize
+                    randomSeed(millis() + esp_random());
+                    int chosenIdx = random(0, nimCount);
+                    tempNIM = nims[chosenIdx]; // Use tempNIM to store the result
+                    
+                    delete[] nims; // Free memory!
+                    currentState = STATE_RANDOM_RESULT;
+                    needRender = true;
+                }
+            }
+        }
+        break;
+
+        case STATE_RANDOM_RESULT:
+        {
+            if (needRender) {
+                lcd->clear();
+                lcd->printLine(0, "MAHASISWA TERPILIH:");
+                lcd->printLine(1, "NIM:");
+                lcd->printLine(2, tempNIM);
+                lcd->printLine(3, "D.Selesai");
+                needRender = false;
+            }
+
+            if (keypad->getKey() == 'D') {
+                currentState = STATE_MENU_DOSEN;
+                needRender = true;
+            }
         }
         break;
 

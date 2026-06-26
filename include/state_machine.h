@@ -85,6 +85,11 @@ enum State {
     STATE_PUSH_FP_MANUAL,            // Push semua fingerprint mahasiswa ke API
     STATE_PULL_FP_MANUAL,            // Pull fingerprint mahasiswa dari API
 
+    // Fitur Randomizer Mahasiswa
+    STATE_RANDOM_SELECT_KELAS,
+    STATE_RANDOM_EXECUTE,
+    STATE_RANDOM_RESULT,
+
     // TUGAS 2: Push Pending dengan Otorisasi Dosen
     STATE_PUSH_PENDING_AUTH,        // Otorisasi dosen sebelum push batch
     STATE_PUSH_PENDING_EXEC,         // Eksekusi push batch
